@@ -2,7 +2,7 @@
 
 set -e
 
-echo "Installing Rust 1.89.0"
+echo "Installing Rust 1.95.0"
 
 #卸载可能存在的旧版本
 if command -v rustup &> /dev/null; then
@@ -11,7 +11,7 @@ if command -v rustup &> /dev/null; then
 fi
 
 #通过rustup安装指定版本的Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.89.0 --profile minimal
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95.0 --profile minimal
 
 #获取rustup环境
 source "$HOME/.cargo/env"
@@ -23,6 +23,6 @@ echo "Cargo version:"
 cargo --version
 
 #确保使用正确的工具链
-rustup default 1.89.0
+rustup default 1.95.0
 
-echo "Rust 1.89.0 installation completed"
+echo "Rust 1.95.0 installation completed"

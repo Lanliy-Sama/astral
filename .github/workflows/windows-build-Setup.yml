@@ -18,7 +18,7 @@ jobs:
     env:
       FLUTTER_VERSION: beta
       FLUTTER_CHANNEL: beta
-      RUST_VERSION: 1.89.0
+      RUST_VERSION: 1.95.0
       
     steps:
       - name: 🛠️ 检出代码仓库
@@ -32,7 +32,7 @@ jobs:
            # 安装Flutter
            
       # 安装 Rust
-      - name: 🦀 安装 Rust 1.89.0
+      - name: 🦀 安装 Rust 1.95.0
         run: |
           & "$env:GITHUB_WORKSPACE\scripts\install_rust.ps1"
         shell: pwsh

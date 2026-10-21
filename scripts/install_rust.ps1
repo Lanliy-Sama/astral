@@ -1,5 +1,5 @@
-# Rust 1.89.0 安装脚本
-Write-Host "Installing Rust 1.89.0"
+# Rust 1.95.0 安装脚本
+Write-Host "Installing Rust 1.95.0"
 
 # 如果存在rustup，先尝试卸载
 if (Get-Command rustup -ErrorAction SilentlyContinue) {
@@ -8,10 +8,10 @@ if (Get-Command rustup -ErrorAction SilentlyContinue) {
 }
 
 # 通过rustup安装指定版本的Rust
-Write-Host "Downloading and installing Rust 1.89.0..."
+Write-Host "Downloading and installing Rust 1.95.0..."
 $rustupUrl = "https://win.rustup.rs/x86_64"
 Invoke-WebRequest -Uri $rustupUrl -OutFile "rustup-init.exe"
-.\rustup-init.exe -y --default-toolchain 1.89.0 --profile minimal
+.\rustup-init.exe -y --default-toolchain 1.95.0 --profile minimal
 Remove-Item .\rustup-init.exe
 
 # 获取rustup环境
@@ -27,6 +27,6 @@ Write-Host "Cargo version:"
 cargo --version
 
 # 确保使用正确的工具链
-rustup default 1.89.0
+rustup default 1.95.0
 
-Write-Host "Rust 1.89.0 installation completed"
+Write-Host "Rust 1.95.0 installation completed"

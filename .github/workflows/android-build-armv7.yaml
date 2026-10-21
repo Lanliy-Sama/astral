@@ -16,7 +16,7 @@ jobs:
     env:
       FLUTTER_VERSION: beta
       FLUTTER_CHANNEL: beta
-      RUST_VERSION: 1.89.0
+      RUST_VERSION: 1.95.0
       NDK_VERSION: 28.2.13676358
       JDK_VERSION: 17
       CMAKE_VERSION: 3.18.1
@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: 🦀 设置 Rust 工具链 1.89.0
+      - name: 🦀 设置 Rust 工具链 1.95.0
         run: |
           chmod +x $GITHUB_WORKSPACE/scripts/install_rust.sh
           $GITHUB_WORKSPACE/scripts/install_rust.sh
