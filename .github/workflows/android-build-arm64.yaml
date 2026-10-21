@@ -55,10 +55,13 @@ jobs:
           distribution: 'adopt'
 
       - name: 🤖 设置 Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          ndk-version: '28.2.13676358'
-          cmake-version: '3.18.1'
+        run: |
+          SDKMANAGER="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$SDKMANAGER" ]; then SDKMANAGER=sdkmanager; fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install "ndk;28.2.13676358" > /dev/null
+          "$SDKMANAGER" --install "cmake;3.18.1" > /dev/null 2>&1 || true
           
       - name: 🐦 安装 Flutter
         run: |
