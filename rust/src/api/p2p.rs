@@ -1,7 +1,7 @@
 use easytier::common::config::{ConfigFileControl, PortForwardConfig};
 pub use easytier::common::config::{ConfigLoader, NetworkIdentity, PeerConfig, TomlConfigLoader};
 pub use easytier::common::global_ctx::{EventBusSubscriber, GlobalCtxEvent};
-pub use easytier::instance_manager::NetworkInstanceManager;
+pub use easytier::instance::factory::NativeInstanceManager;
 pub use easytier::proto;
 pub use easytier::proto::api::instance::{PeerRoutePair, Route};
 pub use easytier::proto::common::NatType;
@@ -15,7 +15,7 @@ pub static DEFAULT_ET_DNS_ZONE: &str = "as.net.";
 
 lazy_static! {
     static ref RT: Runtime = Runtime::new().expect("failed to create tokio runtime");
-    static ref MANAGER: NetworkInstanceManager = NetworkInstanceManager::new();
+    static ref MANAGER: NativeInstanceManager = easytier::instance::factory::native_instance_manager();
 }
 
 fn parse_instance_id(instance_id: &str) -> Result<Uuid, String> {
@@ -24,10 +24,10 @@ fn parse_instance_id(instance_id: &str) -> Result<Uuid, String> {
 
 async fn get_instance_info(
     instance_id: &str,
-) -> Result<easytier::launcher::NetworkInstanceRunningInfo, String> {
+) -> Result<easytier::proto::api::manage::NetworkInstanceRunningInfo, String> {
     let id = parse_instance_id(instance_id)?;
     MANAGER
-        .get_network_info(&id)
+        .network_info(id)
         .await
         .ok_or_else(|| "instance not found".to_string())
 }
@@ -206,7 +206,7 @@ pub async fn is_easytier_running(instance_id: String) -> bool {
     let Ok(id) = parse_instance_id(&instance_id) else {
         return false;
     };
-    MANAGER.list_network_instance_ids().contains(&id)
+    MANAGER.instance_ids().contains(&id)
 }
 
 pub use super::simple::{KVNetworkStatus, KVNodeConnectionStats, KVNodeInfo, NodeHopStats};
@@ -243,7 +243,7 @@ pub async fn get_ips(instance_id: String) -> Vec<String> {
 pub async fn set_tun_fd(instance_id: String, fd: i32) -> Result<(), String> {
     let id = parse_instance_id(&instance_id)?;
     MANAGER
-        .set_tun_fd(&id, fd)
+        .attach_tun_fd(id, fd)
         .map_err(|e| format!("set_tun_fd failed: {}", e))
 }
 
@@ -274,7 +274,7 @@ pub fn create_server(config_toml: String, watch_event: bool) -> JoinHandle<Resul
         let instance_id = cfg.get_id();
 
         MANAGER
-            .run_network_instance(cfg, watch_event, ConfigFileControl::STATIC_CONFIG)
+            .run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)
             .map_err(|e| format!("start instance failed: {}", e))?;
 
         Ok(instance_id.to_string())
@@ -408,7 +408,7 @@ pub fn create_server_with_flags(
         let instance_id = cfg.get_id();
 
         MANAGER
-            .run_network_instance(cfg, true, ConfigFileControl::STATIC_CONFIG)
+            .run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)
             .map_err(|e| format!("start instance failed: {}", e))?;
 
         Ok(instance_id.to_string())
@@ -417,10 +417,12 @@ pub fn create_server_with_flags(
 
 pub fn close_server(instance_id: String) -> Result<(), String> {
     let id = parse_instance_id(&instance_id)?;
-    MANAGER
-        .delete_network_instance(vec![id])
-        .map_err(|e| format!("delete instance failed: {}", e))?;
-    Ok(())
+    RT.block_on(async {
+        MANAGER
+            .delete_network_instances(vec![id])
+            .await
+            .map_err(|e| format!("delete instance failed: {}", e))
+    })
 }
 pub async fn get_peer_route_pairs(instance_id: String) -> Result<Vec<PeerRoutePair>, String> {
     let info = get_instance_info(&instance_id).await?;
