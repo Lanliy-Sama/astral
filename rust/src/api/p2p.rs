@@ -421,6 +421,7 @@ pub fn close_server(instance_id: String) -> Result<(), String> {
         MANAGER
             .delete_network_instances(vec![id])
             .await
+            .map(|_| ())
             .map_err(|e| format!("delete instance failed: {}", e))
     })
 }
