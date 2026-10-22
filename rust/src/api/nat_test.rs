@@ -375,7 +375,8 @@ impl HostResolverIter {
             } else {
                 format!("{}:3478", host)
             };
-            if let Ok(ips) = lookup_host(&host).await {
+            let resolved = lookup_host(&host).await;
+            if let Ok(ips) = resolved {
                 self.ips = ips
                     .filter(|x| if self.use_ipv6 { x.is_ipv6() } else { x.is_ipv4() })
                     .take(self.max_ip_per_domain as usize)
@@ -455,7 +456,7 @@ impl StunClient {
 
             let mut decoder = MessageDecoder::<Attribute>::new();
             let msg = match decoder.decode_from_bytes(&data) {
-                Ok(Some(msg)) => msg,
+                Ok(Ok(msg)) => msg,
                 _ => continue,
             };
 
