@@ -1,0 +1,125 @@
+name: Daily EasyTier Update
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: daily-easytier-update
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  update-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update easytier in Cargo.lock
+        run: |
+          command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . "$HOME/.cargo/env")
+          cd rust
+          cargo update -p easytier
+          cd ..
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No new EasyTier commits today, skipping release."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version
+        if: steps.changes.outputs.changed == 'true'
+        id: version
+        run: |
+          CURRENT=$(grep '^version:' pubspec.yaml | sed 's/version: *//' | tr -d '[:space:]')
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          sed -i "s/^version: .*/version: $NEW_VERSION/" pubspec.yaml
+          ET_SOURCE=$(grep -A3 'name = "easytier"' rust/Cargo.lock | grep 'source = ' | head -1)
+          ET_COMMIT=$(echo "$ET_SOURCE" | sed 's/.*#\([0-9a-f]*\).*/\1/')
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "et_commit=$ET_COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "Lanliy-Okami"
+          git config user.email "345453228+Lanliy-Okami@users.noreply.github.com"
+          git add rust/Cargo.lock pubspec.yaml
+          git commit -m "chore(deps): bump EasyTier to latest main (v${{ steps.version.outputs.version }})"
+          git push
+
+      - name: Trigger platform builds
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          mkdir -p /tmp/daily-update
+          for wf in windows-build.yml windows-build-Setup.yml linux-build.yaml; do
+            gh run list --workflow "$wf" --limit 1 --json databaseId --jq '.[0].databaseId' > "/tmp/daily-update/old-$wf" 2>/dev/null || echo 0 > "/tmp/daily-update/old-$wf"
+          done
+          sleep 10
+          for wf in windows-build.yml windows-build-Setup.yml linux-build.yaml; do
+            gh workflow run "$wf" --ref main
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Wait for builds and collect artifacts
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          set -e
+          mkdir -p release-assets
+          for wf in windows-build.yml windows-build-Setup.yml linux-build.yaml; do
+            OLD_ID=$(cat "/tmp/daily-update/old-$wf")
+            NEW_ID=""
+            for i in $(seq 1 60); do
+              CAND=$(gh run list --workflow "$wf" --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+              if [ -n "$CAND" ] && [ "$CAND" != "$OLD_ID" ]; then NEW_ID=$CAND; break; fi
+              sleep 15
+            done
+            if [ -z "$NEW_ID" ]; then
+              echo "ERROR: new run for $wf never appeared"
+              exit 1
+            fi
+            echo "Watching run $NEW_ID for $wf"
+            gh run watch "$NEW_ID" --exit-status --interval 30
+            gh run download "$NEW_ID" -D "release-assets/$wf"
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create release
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          set -e
+          mkdir -p assets
+          find release-assets -type f -exec cp {} assets/ \;
+          echo "Assets to upload:"
+          ls -la assets/
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "Astral ${{ steps.version.outputs.version }}" \
+            --notes "Daily EasyTier tracking build. EasyTier commit: ${{ steps.version.outputs.et_commit }}. Built from main at this tag." \
+            assets/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Revert bump on failure
+        if: failure() && steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "Lanliy-Okami"
+          git config user.email "345453228+Lanliy-Okami@users.noreply.github.com"
+          git revert HEAD --no-edit || true
+          git push || true

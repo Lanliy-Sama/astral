@@ -17,7 +17,7 @@ class GitHubProxySelector {
   ];
 
   /// 用于测速的小体积 GitHub 资源。
-  static const _probeUrl = 'https://github.com/ldoubil/astral';
+  static const _probeUrl = 'https://github.com/Lanliy-Sama/astral';
 
   static const _probeTimeout = Duration(seconds: 6);
   static const _cacheTtl = Duration(hours: 1);

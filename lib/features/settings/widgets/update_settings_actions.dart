@@ -9,7 +9,7 @@ import 'package:astral/shared/widgets/common/update_check_ui.dart';
 import 'package:astral/features/settings/pages/general/history_versions_page.dart';
 
 void checkForUpdates(BuildContext context) {
-  final checker = UpdateChecker(owner: 'ldoubil', repo: 'astral');
+  final checker = UpdateChecker(owner: 'Lanliy-Sama', repo: 'astral');
   if (context.mounted) {
     UpdateCheckUi.checkAndPresent(context, checker);
   }
@@ -22,7 +22,7 @@ void navigateToHistoryVersions(BuildContext context) {
 }
 
 void redownloadUpdate(BuildContext context) {
-  final checker = UpdateChecker(owner: 'ldoubil', repo: 'astral');
+  final checker = UpdateChecker(owner: 'Lanliy-Sama', repo: 'astral');
   if (context.mounted) {
     UpdateCheckUi.checkAndPresent(context, checker, forceShowDownload: true);
   }
