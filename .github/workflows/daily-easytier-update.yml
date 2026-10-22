@@ -105,14 +105,14 @@ jobs:
         if: steps.changes.outputs.changed == 'true'
         run: |
           set -e
-          mkdir -p assets
-          find release-assets -type f -exec cp {} assets/ \;
+          mkdir -p release-files
+          find release-assets -type f -exec cp {} release-files/ \;
           echo "Assets to upload:"
-          ls -la assets/
+          ls -la release-files/
           gh release create "${{ steps.version.outputs.tag }}" \
             --title "Astral ${{ steps.version.outputs.version }}" \
             --notes "Daily EasyTier tracking build. EasyTier commit: ${{ steps.version.outputs.et_commit }}. Built from main at this tag." \
-            assets/*
+            release-files/*
         env:
           GH_TOKEN: ${{ github.token }}
 
