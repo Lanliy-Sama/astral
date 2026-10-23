@@ -62,7 +62,8 @@ mod udp;
 
 const DIRECT_CONNECTOR_BLACKLIST_TIMEOUT: Duration = Duration::from_secs(300);
 const INVALID_SERVICE_BLACKLIST_TIMEOUT: Duration = Duration::from_secs(3600);
-const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+// Heart mod: 3 -> 5s, lossy-path punch/handshake gets a fuller budget per attempt
+const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DIRECT_TASK_LOOP_INTERVAL_MS: u64 = 5000;
 const MAX_IPV6_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
 const MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
@@ -368,7 +369,9 @@ where
     H: DirectConnectorHost,
 {
     async fn try_direct_connect(self: Arc<Self>, dst_peer_id: PeerId) -> anyhow::Result<()> {
-        let backoffs_ms = [1000, 2000, 2000, 5000, 5000, 10000, 30000, 60000];
+        // Heart mod: cap tail at 30s and densify the mid-band so a burst-loss
+        // disconnect finds the recovered network faster on soft-failure loops
+        let backoffs_ms = [1000, 2000, 2000, 5000, 5000, 10000, 15000, 30000];
         let mut backoff_index = 0usize;
         let mut attempt = 0usize;
 
