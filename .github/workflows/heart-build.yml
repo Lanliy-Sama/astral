@@ -88,7 +88,7 @@ jobs:
           if-no-files-found: error
 
   build-astral:
-    name: Build Astral from Heart branch
+    name: Build Astral from main branch
     timeout-minutes: 120
     runs-on: ubuntu-latest
     env:
@@ -98,14 +98,14 @@ jobs:
         run: |
           mkdir -p /tmp/heart-build
           for wf in windows-build.yml windows-build-Setup.yml linux-build.yaml; do
-            gh run list --workflow "$wf" --branch Heart --limit 1 --json databaseId --jq '.[0].databaseId' > "/tmp/heart-build/old-$wf" 2>/dev/null || echo 0 > "/tmp/heart-build/old-$wf"
+            gh run list --workflow "$wf" --branch main --limit 1 --json databaseId --jq '.[0].databaseId' > "/tmp/heart-build/old-$wf" 2>/dev/null || echo 0 > "/tmp/heart-build/old-$wf"
           done
 
-      - name: Trigger Astral platform builds on Heart
+      - name: Trigger Astral platform builds on main
         run: |
           sleep 10
           for wf in windows-build.yml windows-build-Setup.yml linux-build.yaml; do
-            gh workflow run "$wf" --ref Heart
+            gh workflow run "$wf" --ref main
           done
 
       - name: Wait for builds and collect artifacts
@@ -116,7 +116,7 @@ jobs:
             OLD_ID=$(cat "/tmp/heart-build/old-$wf")
             NEW_ID=""
             for i in $(seq 1 60); do
-              CAND=$(gh run list --workflow "$wf" --branch Heart --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+              CAND=$(gh run list --workflow "$wf" --branch main --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
               if [ -n "$CAND" ] && [ "$CAND" != "$OLD_ID" ]; then NEW_ID=$CAND; break; fi
               sleep 15
             done
@@ -166,9 +166,9 @@ jobs:
             gh release upload "$TAG" flat/* --clobber
           else
             gh release create "$TAG" \
-              --target Heart \
+              --target main \
               --title "Heart Build (modded EasyTier)" \
               --prerelease \
-              --notes "Dual build from the Heart setup. Server: easytier-core binaries from the Easytier-Heart branch (modded EasyTier 54f2850d with high-packet-loss resilience: pong wait 2s to 10s, ping failure threshold 5 to 20, conn handshake budget 5s to 30s, relay handshake timeout 5s to 30s, OSPF liveness 45s to 120s, session idle 60s to 180s). Client: Astral builds from the Heart branch with the easytier dependency switched to the Easytier-Heart branch." \
+              --notes "Dual build from the Heart setup. Server: easytier-core binaries from the Easytier-Heart branch (modded EasyTier 54f2850d with high-packet-loss resilience: pong wait 2s to 10s, ping failure threshold 5 to 20, conn handshake budget 5s to 30s, relay handshake timeout 5s to 30s, OSPF liveness 45s to 120s, session idle 60s to 180s). Client: Astral builds from the main branch with the easytier dependency pointing at the Easytier-Heart branch." \
               flat/*
           fi
