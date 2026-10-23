@@ -46,10 +46,10 @@ Future<void> handleStartupSetting(bool enable) async {
   final command = '"$executablePath" --autostart';
 
   await _removeLegacyStartupShortcut();
-  await _removeLegacyRegistryRun();
 
   if (enable) {
-    // 使用 Task Scheduler ONSTART 触发器，系统启动时即运行（登录前）
+    // ONLOGON：用户登录时在用户会话内启动（托盘/设置/窗口全部可达）。
+    // 旧的 ONSTART 触发器在登录前 Session 0 启动 GUI，窗口与托盘不可达。
     final result = await Process.run('schtasks', [
       '/create',
       '/tn',
@@ -57,14 +57,30 @@ Future<void> handleStartupSetting(bool enable) async {
       '/tr',
       command,
       '/sc',
-      'ONSTART',
+      'ONLOGON',
       '/rl',
       'HIGHEST',
       '/f',
     ]);
-    if (result.exitCode != 0 && kDebugMode) {
+    if (result.exitCode == 0) {
+      await _removeLegacyRegistryRun();
+      return;
+    }
+    if (kDebugMode) {
       debugPrint('Failed to register startup task: ${result.stderr}');
     }
+    // 回退：HKCU Run 键（无需管理员权限，同样在登录时于用户会话启动）
+    await Process.run('reg', [
+      'add',
+      'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+      '/v',
+      'Astral',
+      '/t',
+      'REG_SZ',
+      '/d',
+      command,
+      '/f',
+    ]);
   } else {
     final result = await Process.run('schtasks', [
       '/delete',
