@@ -17,6 +17,9 @@ permissions:
   contents: write
   actions: write
 
+env:
+  GH_REPO: ${{ github.repository }}
+
 jobs:
   build-server:
     name: Build easytier-core (${{ matrix.ARTIFACT }})
@@ -68,6 +71,8 @@ jobs:
 
       - name: Build easytier-core (modded)
         run: cargo build --release --target ${{ matrix.TARGET }} --package easytier --bin easytier-core --features "wireguard,websocket,quic,tun,smoltcp,socks5,kcp,faketcp,magic-dns,zstd"
+        env:
+          RUSTFLAGS: "--cap-lints=warn"
 
       - name: Stage binary
         run: |
