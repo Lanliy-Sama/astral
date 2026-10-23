@@ -1,94 +1,349 @@
-<div align="center">
-  <img width="300" src="https://astral.fan/_astro/%E6%9A%97%E8%89%B2.C9IdEQgX.svg" alt="Astral Logo">
-  <h1 id="astral"></h1>
+# EasyTier
 
-  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ldoubil/astral)
-  ![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-lightgrey.svg)
-  ![Platforms](https://img.shields.io/badge/平台-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android%20%7C%20iOS-blue?style=flat-square)
-  ![Languages](https://img.shields.io/badge/多语言支持-中文%7C英文%7C德文%7C西班牙文%7C法文%7C日文%7C韩文%7C俄文-orange?style=flat-square)
-  
-  ![访问次数](https://count.getloli.com/@astral?name=astral-home&theme=original-new&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
-  
-  ![Repobeats](https://repobeats.axiom.co/api/embed/c8f00565120b9bd12bd4e50050e44b3515acb1cb.svg "Repobeats analytics image")
-</div>
+[![Github release](https://img.shields.io/github/v/tag/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/releases)
+[![GitHub](https://img.shields.io/github/license/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/blob/main/LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/commits/main)
+[![GitHub issues](https://img.shields.io/github/issues/EasyTier/EasyTier)](https://github.com/EasyTier/EasyTier/issues)
+[![GitHub Core Actions](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/core.yml)
+[![GitHub GUI Actions](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/gui.yml)
+[![GitHub Test Actions](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml/badge.svg)](https://github.com/EasyTier/EasyTier/actions/workflows/test.yml)
+[<img src="https://devin.ai/assets/askdeepwiki.png" alt="Ask DeepWiki" height="20"/>](https://deepwiki.com/EasyTier/EasyTier)
 
-Astral 是一个基于 EasyTier 的跨平台网络应用，提供简单易用的 P2P 网络连接。通过 Flutter 构建的现代化界面，让用户能够轻松创建和管理虚拟网络。
+[简体中文](/README_CN.md) | [English](/README.md)
 
-## ✨ 主要特性
+> ✨ A simple, secure, decentralized virtual private network solution powered by Rust and Tokio
 
-- 🌐 **P2P 网络连接** - 基于 EasyTier 的去中心化网络架构
-- 🔒 **VPN 服务** - 安全的虚拟专用网络连接
-- 🖥️ **跨平台支持** - 全面支持多种操作系统和设备
-  - 💻 **桌面平台**: Windows、macOS、Linux
-  - 📱 **移动平台**: Android、iOS
-- 🌍 **多语言支持** - 提供多种语言界面
-- 🎨 **现代化界面** - 基于 Flutter 的美观用户界面
-- ⚡ **高性能** - Rust 后端确保高效的网络处理
-- 🔧 **易于配置** - 简单的房间和服务器管理
+<p align="center">
+<img src="assets/config-page.png" width="300" alt="config page">
+<img src="assets/running-page.png" width="300" alt="running page">
+</p>
 
-## 🚀 快速开始
+📚 **[Full Documentation](https://easytier.cn/en/)** | 🖥️ **[Web Console](https://easytier.cn/web)** | 📝 **[Download Releases](https://github.com/EasyTier/EasyTier/releases)** | **[Nightly](https://github.com/EasyTier/EasyTier/releases/tag/nightly)** | 🧩 **[Third Party Tools](https://easytier.cn/en/guide/installation_gui.html#third-party-graphical-interfaces)** | ❤️ **[Sponsor](#sponsor)**
 
-> 详细的安装和使用指南请参考我们的[项目文档](#)
+## Features
 
-## 🛠️ 技术栈
+### Core Features
 
-- **前端**: Flutter (Dart)
-- **后端**: Rust (EasyTier)
-- **网络**: P2P、WireGuard
+- 🔒 **Decentralized**: Nodes are equal and independent, no centralized services required  
+- 🚀 **Easy to Use**: Multiple operation methods via web, client, and command line  
+- 🌍 **Cross-Platform**: Supports Win/MacOS/Linux/FreeBSD/Android and X86/ARM/MIPS architectures  
+- 🔐 **Secure**: AES-GCM or WireGuard encryption, prevents man-in-the-middle attacks  
 
-## 📦 功能说明
+### Advanced Capabilities
 
-- **房间管理** - 创建和加入网络房间
-- **服务器配置** - 配置和管理网络服务器
-- **用户管理** - 查看和管理网络用户
-- **网络设置** - 自定义网络参数和配置
+- 🔌 **Efficient NAT Traversal**: Supports UDP and IPv6 traversal, works with NAT4-NAT4 networks  
+- 🌐 **Subnet Proxy**: Nodes can share subnets for other nodes to access  
+- 🔄 **Intelligent Routing**: Latency priority and automatic route selection for best network experience  
+- ⚡ **High Performance**: Zero-copy throughout the entire link, supports TCP/UDP/WSS/WG protocols  
 
-## 🌍 多语言支持
+### Network Optimization
 
+- 📊 **UDP Loss Resistance**: KCP/QUIC proxy optimizes latency and bandwidth in high packet loss environments  
+- 🔧 **Web Management**: Easy configuration and monitoring through web interface  
+- 🛠️ **Zero Config**: Simple deployment with statically linked executables  
 
-| 语言 | 语言代码 | 文件 |
-|------|---------|------|
-| 🇨🇳 简体中文 | zh | [zh.json](assets/translations/zh.json) |
-| 🇺🇸 英语 | en | [en.json](assets/translations/en.json) |
+## Quick Start
 
+### 📥 Installation
 
+Choose the installation method that best suits your needs:
 
-## 📄 许可协议
+Linux (Recommended):
+```bash
+curl -fsSL "https://github.com/EasyTier/EasyTier/blob/main/script/install.sh?raw=true" | sudo bash -s install
+```
 
-本软件采用 [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) 进行许可。
+Homebrew (MacOS/Linux):
+```bash
+brew tap brewforge/chinese
+brew install --cask easytier-gui
+```
 
-### 使用限制说明
-⚠️ 本软件仅供学习和非商业用途使用，使用时需遵守以下条款：
-- ❌ **禁止商业使用** - 不得将本软件用于任何商业目的
-- ❌ **禁止修改软件名称** - 不得更改 "Astral" 软件名称以混淆身份或进行二次售卖
-- ✅ **保留版权声明** - 分发时必须保留 `LICENSE` 中的 Required Notice 及许可全文
-- ✅ **遵循许可协议** - 严格遵守上述许可协议的全部条款
+Windows (Recommended, run with administrator privileges):
+```powershell
+irm "https://github.com/EasyTier/EasyTier/blob/main/script/install.ps1?raw=true" | iex
+```
 
-## 🙏 鸣谢
+Install via cargo (Latest development version): 
+```bash
+cargo install --git https://github.com/EasyTier/EasyTier.git easytier
+```
 
-<div align="center">
-  <p>感谢浪浪云提供云服务器赞助</p>
-  <a href="https://langlangy.cn/" target="_blank">
-    <img src="https://astral.fan/images/%E8%B5%9E%E5%8A%A9/logo%20(1).png" 
-         style="width: 200px; max-width: 100%; height: auto; border-radius: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);"
-         alt="浪浪云赞助">
+Install prebuilt CLI tools with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) (specify an existing release version):
+```bash
+cargo binstall --git https://github.com/EasyTier/EasyTier.git --version 2.6.4 easytier
+```
+
+This installs `easytier-core` and `easytier-cli` using the repository's metadata, independently of crates.io publication. On Windows, also copy the DLL and driver files from the matching release ZIP beside the installed binaries; binstall only installs executables.
+
+[Install pre-built binary](https://github.com/EasyTier/EasyTier/releases) (Recommended, All platforms supported)
+
+For a smaller executable, try [easytier-mini](https://github.com/EasyTier/easytier-mini), which supports basic TCP/UDP networking. See its documentation for supported features and usage.
+
+[Install via Docker](https://easytier.cn/en/guide/installation.html#installation-methods)
+
+[Install OpenWrt ipk package](https://github.com/EasyTier/luci-app-easytier)
+
+Additional steps:
+
+[One-Click Register Service](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) (Automatically start when the system boots and run in the background)
+
+### 🚀 Basic Usage
+
+#### Quick Networking with Shared Nodes
+
+EasyTier supports quick networking using shared public nodes. When you don't have a public IP, you can use the free shared nodes provided by the EasyTier community. Nodes will automatically attempt NAT traversal and establish P2P connections. When P2P fails, data will be relayed through shared nodes.
+
+When using shared nodes, each node entering the network needs to provide the same `--network-name` and `--network-secret` parameters as the unique identifier of the network.
+
+Taking two nodes as an example (Please use more complex network name to avoid conflicts):
+
+1. Run on Node A:
+
+```bash
+# Run with administrator privileges
+sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<SharedNodeIP>:11010
+```
+
+2. Run on Node B:
+
+```bash
+# Run with administrator privileges
+sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<SharedNodeIP>:11010
+```
+
+After successful execution, you can check the network status using `easytier-cli`:
+
+```text
+| ipv4         | hostname       | cost  | lat_ms | loss_rate | rx_bytes | tx_bytes | tunnel_proto | nat_type | id         | version         |
+| ------------ | -------------- | ----- | ------ | --------- | -------- | -------- | ------------ | -------- | ---------- | --------------- |
+| 10.126.126.1 | abc-1          | Local | *      | *         | *        | *        | udp          | FullCone | 439804259  | 2.6.2-70e69a38~ |
+| 10.126.126.2 | abc-2          | p2p   | 3.452  | 0         | 17.33 kB | 20.42 kB | udp          | FullCone | 390879727  | 2.6.2-70e69a38~ |
+|              | PublicServer_a | p2p   | 27.796 | 0.000     | 50.01 kB | 67.46 kB | tcp          | Unknown  | 3771642457 | 2.6.2-70e69a38~ |
+```
+
+You can test connectivity between nodes:
+
+```bash
+# Test connectivity
+ping 10.126.126.1
+ping 10.126.126.2
+```
+
+Note: If you cannot ping through, it may be that the firewall is blocking incoming traffic. Please turn off the firewall or add allow rules.
+
+To improve availability, you can connect to multiple shared nodes simultaneously:
+
+```bash
+# Connect to multiple shared nodes
+sudo easytier-core -d --network-name abc --network-secret abc -p tcp://<SharedNodeIP1>:11010 -p udp://<SharedNodeIP2>:11010
+```
+
+Once your network is set up successfully, you can easily configure it to start automatically on system boot. Refer to the [One-Click Register Service guide](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) for step-by-step instructions on registering EasyTier as a system service.
+
+#### Decentralized Networking
+
+EasyTier is fundamentally decentralized, with no distinction between server and client. As long as one device can communicate with any node in the virtual network, it can join the virtual network. Here's how to set up a decentralized network:
+
+1. Start First Node (Node A):
+
+```bash
+# Start the first node
+sudo easytier-core -i 10.144.144.1
+```
+
+After startup, this node will listen on the following ports by default:
+- TCP: 11010
+- UDP: 11010
+- WebSocket: 11011
+- WebSocket SSL: 11012
+- WireGuard: 11013
+
+2. Connect Second Node (Node B):
+
+```bash
+# Connect to the first node using its public IP
+sudo easytier-core -i 10.144.144.2 -p udp://FIRST_NODE_PUBLIC_IP:11010
+```
+
+3. Verify Connection:
+
+```bash
+# Test connectivity
+ping 10.144.144.2
+
+# View connected peers
+easytier-cli peer
+
+# View routing information
+easytier-cli route
+
+# View local node information
+easytier-cli node
+```
+
+For more nodes to join the network, they can connect to any existing node in the network using the `-p` parameter:
+
+```bash
+# Connect to any existing node using its public IP
+sudo easytier-core -i 10.144.144.3 -p udp://ANY_EXISTING_NODE_PUBLIC_IP:11010
+```
+
+### 🔍 Advanced Features
+
+#### Subnet Proxy
+
+Assuming the network topology is as follows, Node B wants to share its accessible subnet 10.1.1.0/24 with other nodes:
+
+```mermaid
+flowchart LR
+
+subgraph Node A Public IP 22.1.1.1
+nodea[EasyTier<br/>10.144.144.1]
+end
+
+subgraph Node B
+nodeb[EasyTier<br/>10.144.144.2]
+end
+
+id1[[10.1.1.0/24]]
+
+nodea <--> nodeb <-.-> id1
+```
+
+To share a subnet, add the `-n` parameter when starting EasyTier:
+
+```bash
+# Share subnet 10.1.1.0/24 with other nodes
+sudo easytier-core -i 10.144.144.2 -n 10.1.1.0/24
+```
+
+Subnet proxy information will automatically sync to each node in the virtual network, and each node will automatically configure the corresponding route. You can verify the subnet proxy setup:
+
+1. Check if the routing information has been synchronized (the proxy_cidrs column shows the proxied subnets):
+
+```bash
+# View routing information
+easytier-cli route
+```
+
+![Routing Information](/assets/image-3.png)
+
+2. Test if you can access nodes in the proxied subnet:
+
+```bash
+# Test connectivity to proxied subnet
+ping 10.1.1.2
+```
+
+#### WireGuard Integration
+
+EasyTier can act as a WireGuard server, allowing any device with a WireGuard client (including iOS and Android) to access the EasyTier network. Here's an example setup:
+
+```mermaid
+flowchart LR
+
+ios[[iPhone<br/>WireGuard Installed]]
+
+subgraph Node A Public IP 22.1.1.1
+nodea[EasyTier<br/>10.144.144.1]
+end
+
+subgraph Node B
+nodeb[EasyTier<br/>10.144.144.2]
+end
+
+id1[[10.1.1.0/24]]
+
+ios <-.-> nodea <--> nodeb <-.-> id1
+```
+
+1. Start EasyTier with WireGuard portal enabled:
+
+```bash
+# Register one WireGuard client as virtual peer 10.144.144.3
+sudo easytier-core -i 10.144.144.1 \
+  --network-secret portal-secret \
+  --vpn-portal wg://0.0.0.0:11013 \
+  --vpn-portal-private-key "$(wg genkey)" \
+  --vpn-portal-client phone=10.144.144.3
+```
+
+2. Get WireGuard client configuration:
+
+```bash
+# Get WireGuard client configuration
+easytier-cli vpn-portal
+```
+
+3. In the output configuration, replace a wildcard `Peer.Endpoint` with the
+   public IP/domain of your EasyTier node, then import it. `Interface.Address`
+   is local to that WireGuard client and may be changed to any IPv4 address;
+   EasyTier translates it to the registered virtual-peer address.
+
+#### Self-Hosted Public Shared Node
+
+You can run your own public shared node to help other nodes discover each other. A public shared node is just a regular EasyTier network (with same network name and secret) that other networks can connect to.
+
+To run a public shared node:
+
+```bash
+# No need to specify IPv4 address for public shared nodes
+sudo easytier-core --network-name mysharednode --network-secret mysharednode
+```
+
+## Related Projects
+
+- [ZeroTier](https://www.zerotier.com/): A global virtual network for connecting devices.
+- [TailScale](https://tailscale.com/): A VPN solution aimed at simplifying network configuration.
+
+### Contact Us
+
+- 💬 **[Telegram Group](https://t.me/easytier)**
+- 👥 **[QQ Group]**
+  - No.1 [949700262](https://qm.qq.com/q/wFoTUChqZW)
+  - No.2 [837676408](https://qm.qq.com/q/4V33DrfgHe)
+  - No.3 [957189589](https://qm.qq.com/q/YNyTQjwlai)
+
+## License
+
+EasyTier is released under the [LGPL-3.0](https://github.com/EasyTier/EasyTier/blob/main/LICENSE).
+
+## Responsible Use
+
+Use EasyTier only for lawful purposes and in compliance with applicable laws
+and regulations. You are responsible for ensuring that you are authorized to
+connect to and administer the networks and devices involved.
+
+## Sponsor
+
+CDN acceleration and security protection for this project are sponsored by Tencent EdgeOne.
+
+<p align="center">
+  <a href="https://edgeone.ai/?from=github" target="_blank">
+    <img src="assets/edgeone.png" width="200" alt="EdgeOne Logo">
   </a>
-</div>
+</p>
 
-## 💝 赞助支持
+Special thanks to [Langlang Cloud](https://langlangy.cn/?i26c5a5)  and [RainCloud](https://www.rainyun.com/NjM0NzQ1_) for sponsoring our public servers.
+We also thank [Linfeng Cloud (林枫云)](https://www.dkdun.cn/aff/RZGBFYSW) for supporting EasyTier.
 
-<div align="center">
-  <h3>🌟 支持 Astral 的发展 🌟</h3>
-  <p><strong>如果 Astral 为您带来便利，请考虑支持我们的开发工作！</strong></p>
-  <a href="https://afdian.com/a/AstralGame" target="_blank">
-    <img src="https://img.shields.io/badge/爱发电-支持我们-EA4AAA?style=for-the-badge&logo=github-sponsors&logoColor=white" alt="在爱发电支持我们" />
-  </a>
-  <p>您的每一份支持都将帮助我们创造更好的软件体验！</p>
-</div>
-
-### 联系与资源
-- 🔗 **QQ群**：808169040
-- 📚 **项目文档**：[astral.fan](https://astral.fan)
-- 🌐 **语言支持**：如需帮助翻译或报告翻译问题，请参考[多语言支持](#-多语言支持-1)章节
+<p align="center">
+<a href="https://langlangy.cn/?i26c5a5" target="_blank">
+<img src="assets/langlang.png" width="200">
+</a>
+<a href="https://langlangy.cn/?i26c5a5" target="_blank">
+<img src="assets/raincloud.png" width="200">
+</a>
+<a href="https://www.dkdun.cn/aff/RZGBFYSW" target="_blank">
+<img src="assets/linfengyun.png" width="200" alt="林枫云">
+</a>
+</p>
 
 
+If you find EasyTier helpful, please consider sponsoring us. Software development and maintenance require a lot of time and effort, and your sponsorship will help us better maintain and improve EasyTier.
+
+<p align="center">
+<img src="assets/wechat.png" width="200">
+<img src="assets/alipay.png" width="200">
+</p>
