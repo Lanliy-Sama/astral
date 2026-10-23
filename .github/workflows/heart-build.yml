@@ -1,0 +1,169 @@
+name: Heart Dual Build (Server + Astral)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag name for the Heart release'
+        type: string
+        default: 'Heart-Build'
+        required: true
+
+concurrency:
+  group: heart-dual-build
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build-server:
+    name: Build easytier-core (${{ matrix.ARTIFACT }})
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - TARGET: x86_64-unknown-linux-musl
+            OS: ubuntu-24.04
+            ARTIFACT: linux-x86_64-musl
+            SUFFIX: ''
+          - TARGET: aarch64-unknown-linux-musl
+            OS: ubuntu-24.04-arm
+            ARTIFACT: linux-aarch64-musl
+            SUFFIX: ''
+          - TARGET: x86_64-pc-windows-msvc
+            OS: windows-latest
+            ARTIFACT: windows-x86_64
+            SUFFIX: '.exe'
+    runs-on: ${{ matrix.OS }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout modded EasyTier (Easytier-Heart branch)
+        uses: actions/checkout@v4
+        with:
+          ref: Easytier-Heart
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -qqy build-essential mold musl-tools
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '35.1'
+          repo-token: ${{ github.token }}
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.95'
+          target: ${{ matrix.TARGET }}
+          cache: false
+
+      - name: Build easytier-core (modded)
+        run: cargo build --release --target ${{ matrix.TARGET }} --package easytier --bin easytier-core --features "wireguard,websocket,quic,tun,smoltcp,socks5,kcp,faketcp,magic-dns,zstd"
+
+      - name: Stage binary
+        run: |
+          mkdir -p staging
+          cp "target/${{ matrix.TARGET }}/release/easytier-core${{ matrix.SUFFIX }}" "staging/easytier-core-${{ matrix.ARTIFACT }}${{ matrix.SUFFIX }}"
+          ls -la staging/
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.ARTIFACT }}
+          path: staging/*
+          if-no-files-found: error
+
+  build-astral:
+    name: Build Astral from Heart branch
+    timeout-minutes: 120
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Record current run ids
+        run: |
+          mkdir -p /tmp/heart-build
+          for wf in windows-build.yml windows-build-Setup.yml linux-build.yaml; do
+            gh run list --workflow "$wf" --branch Heart --limit 1 --json databaseId --jq '.[0].databaseId' > "/tmp/heart-build/old-$wf" 2>/dev/null || echo 0 > "/tmp/heart-build/old-$wf"
+          done
+
+      - name: Trigger Astral platform builds on Heart
+        run: |
+          sleep 10
+          for wf in windows-build.yml windows-build-Setup.yml linux-build.yaml; do
+            gh workflow run "$wf" --ref Heart
+          done
+
+      - name: Wait for builds and collect artifacts
+        run: |
+          set -e
+          mkdir -p heart-assets
+          for wf in windows-build.yml windows-build-Setup.yml linux-build.yaml; do
+            OLD_ID=$(cat "/tmp/heart-build/old-$wf")
+            NEW_ID=""
+            for i in $(seq 1 60); do
+              CAND=$(gh run list --workflow "$wf" --branch Heart --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+              if [ -n "$CAND" ] && [ "$CAND" != "$OLD_ID" ]; then NEW_ID=$CAND; break; fi
+              sleep 15
+            done
+            if [ -z "$NEW_ID" ]; then
+              echo "ERROR: new run for $wf never appeared"
+              exit 1
+            fi
+            echo "Watching run $NEW_ID for $wf"
+            gh run watch "$NEW_ID" --exit-status --interval 30
+            gh run download "$NEW_ID" -D "heart-assets/$wf"
+          done
+          ls -laR heart-assets/
+
+      - name: Upload Astral artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: astral-builds
+          path: heart-assets/
+          if-no-files-found: error
+
+  release:
+    name: Publish Heart release
+    timeout-minutes: 15
+    needs: [build-server, build-astral]
+    if: needs.build-server.result == 'success' && needs.build-astral.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files
+          merge-multiple: true
+
+      - name: Flatten release files
+        run: |
+          mkdir -p flat
+          find release-files -type f -exec cp {} flat/ \;
+          echo "Assets to upload:"
+          ls -la flat/
+
+      - name: Create or update Heart release
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" flat/* --clobber
+          else
+            gh release create "$TAG" \
+              --target Heart \
+              --title "Heart Build (modded EasyTier)" \
+              --prerelease \
+              --notes "Dual build from the Heart setup. Server: easytier-core binaries from the Easytier-Heart branch (modded EasyTier 54f2850d with high-packet-loss resilience: pong wait 2s to 10s, ping failure threshold 5 to 20, conn handshake budget 5s to 30s, relay handshake timeout 5s to 30s, OSPF liveness 45s to 120s, session idle 60s to 180s). Client: Astral builds from the Heart branch with the easytier dependency switched to the Easytier-Heart branch." \
+              flat/*
+          fi
