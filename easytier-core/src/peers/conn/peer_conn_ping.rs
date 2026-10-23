@@ -219,7 +219,7 @@ impl PeerConnPinger {
             }
             Ok(())
         };
-        let resp = timeout(Duration::from_secs(10), async {
+        let resp = timeout(Duration::from_secs(4), async {
             if let Some(token) = liveness_token {
                 tokio::select! {
                     ret = wait_for_pong => ret.map(|()| PingResponse::Pong(now.elapsed().as_micros())),
@@ -249,7 +249,7 @@ impl PeerConnPinger {
 
         // one with 1% precision
         let loss_rate_stats_1 = WindowLatency::new(100);
-        // disconnect the connection if lost 20 pingpong consecutively
+        // disconnect the connection if lost 15 pingpong consecutively
         let loss_counter = Arc::new(AtomicU32::new(0));
 
         let (trigger_sender, mut trigger_receiver) = tokio::sync::mpsc::channel(1);
@@ -319,7 +319,7 @@ impl PeerConnPinger {
                 my_node_id
             );
 
-            if loss_counter.load(Ordering::Relaxed) >= 20 {
+            if loss_counter.load(Ordering::Relaxed) >= 15 {
                 tracing::warn!(
                     ?ret,
                     ?self,

@@ -30,7 +30,7 @@ const RELAY_NOISE_VERSION: u32 = 1;
 const RELAY_NOISE_PROLOGUE: &[u8] = b"easytier-relay-noise";
 const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 const HANDSHAKE_RETRY_BASE_MS: u64 = 200;
-const HANDSHAKE_MAX_ATTEMPTS: u32 = 3;
+const HANDSHAKE_MAX_ATTEMPTS: u32 = 5;
 const MAX_PENDING_PACKETS_PER_PEER: usize = 32;
 
 #[derive(Clone)]

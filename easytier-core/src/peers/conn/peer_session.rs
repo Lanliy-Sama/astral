@@ -12,7 +12,7 @@ use crate::peers::util::shrink_dashmap;
 use crate::tunnel::secure_datagram::{SecureDatagramDirection, SecureDatagramSession};
 use crate::{config::PeerId, packet::ZCPacket};
 
-const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct UpsertResponderSessionReturn {
     pub session: Arc<PeerSession>,

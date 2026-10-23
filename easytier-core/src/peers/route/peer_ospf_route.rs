@@ -1981,7 +1981,7 @@ impl VersionAndTouchTime {
 // periodic inbound syncs (forced at least every ~10s by session_task).
 // Treat a longer silence as the initiator having lost this session (e.g.
 // restarted) without telling us.
-const INITIATOR_SESSION_LIVENESS_TIMEOUT: Duration = Duration::from_secs(120);
+const INITIATOR_SESSION_LIVENESS_TIMEOUT: Duration = Duration::from_secs(45);
 
 // if we need to sync route info with one peer, we create a SyncRouteSession with that peer.
 #[derive(Debug)]
