@@ -1,0 +1,256 @@
+# Network Telemetry
+
+## Bandwidth Reference
+
+Connection statistics expose `estimated_tx_bps` and `estimated_rx_bps` in bit/s,
+with `bandwidth_estimate_version = 2`. This is a conservative bandwidth
+reference, not a speed test. No synthetic probe payload is sent. The UI rejects
+unversioned/legacy v1 estimates and closed connections.
+
+For transports with a congestion window, the upper reference remains
+`min(cwnd_bytes / gain, peer_receive_window_bytes) * 8 / transport_RTT_seconds`.
+Gain is 2 for detected BBR and 1 for loss-based control. This is a simple
+steady-state BBR correction, not a reconstruction of its startup, recovery or
+ACK aggregation state. Linux TCP detects BBR through `TCP_CONGESTION`; QUIC
+detects the controller once when attaching the source. Windows TCP retains
+loss-based treatment because its current `SIO_TCP_INFO` snapshot has no
+congestion-controller identity. During active traffic, this window reference is
+capped by the observed application send rate. An idle transport keeps its
+window reference; a windowless transport remains unknown.
+
+If peer flow-control information is not exposed, the formula uses the real
+congestion window alone. Detected BBR uses transport min RTT when available;
+other cases use smoothed transport RTT. The window and RTT must describe the
+same transport leg. Application Ping/Pong latency includes tunnel processing
+and scheduling, so it is not substituted for the transport RTT. Sub-millisecond
+RTTs are preserved without an artificial 1 ms floor; that floor and the former
+application-RTT lower bound could severely underestimate fast LANs, even under
+load. Missing/zero
+RTT and zero windows cannot establish a new estimate; arithmetic overflow is
+rejected instead of reported as a saturated `u64` value.
+No socket send/receive buffer size is substituted for a congestion window.
+There is no fixed capacity limit; a valid window estimate can exceed 10 Gbit/s.
+
+Native TCP uses `TCP_INFO` on Linux and `SIO_TCP_INFO` on Windows. Linux's
+segment-count cwnd is multiplied by the actual sending MSS; Windows already
+reports cwnd in bytes. Snapshots are sampled at most once every 200 ms during
+socket I/O. A temporarily missing or invalid sample retains the last valid
+snapshot without refreshing its timestamp; the snapshot expires 60 seconds
+after its last valid observation and cannot keep a socket alive.
+Only the latest complete valid snapshot is retained. Window bytes and RTT are
+never combined across observations; there is no history queue or median filter.
+WS/WSS retain their underlying TCP telemetry. QUIC/HTTP3 use Quinn's live path
+congestion window and RTT; its peer flow-control credit is not exposed here.
+QUIC reads the current path directly without retaining polling history.
+Other native TCP platforms and transports without congestion-window telemetry
+(plain UDP, WireGuard, fake TCP, ring/host transports) do not use a synthetic
+window.
+
+Windowless transports use receiver feedback piggybacked on normal business
+traffic and the existing per-connection Ping/Pong control path. Each side
+samples tunnel traffic throughput over at least 500 ms and at most 5 seconds. A quick
+Ping/Pong exchange can reuse the most recent sample for up to 5 seconds. A
+direction needs at least 4 KiB in its sample window; control packets therefore
+cannot create a bandwidth estimate on an idle link.
+
+A windowless transport produces an estimate only after at least two recent
+saturation samples. For the outbound direction, the local send rate must be at
+least 15% above the peer's observed receive rate. For the download direction,
+the peer's send rate must be at least 15% above the local receive rate. Each
+delivered rate is retained only for 15 seconds, with up to five samples reduced
+to a lower median. A single sample, a small sample, a light-load sample or an
+older historical maximum cannot establish the estimate.
+
+Upload prefers the local transport reference and a validated outbound
+saturation sample, taking the lower positive value. Download is the peer's
+upper reference combined with a validated inbound saturation sample. Missing
+directions are not mirrored. Remote upper references expire after 90 seconds;
+polling and zero/invalid reports never extend their lifetime. Idle or lightly
+loaded UDP, WireGuard and fake TCP paths display unknown instead of a historical
+peak.
+
+The v2 Ping/Pong report carries the local upper reference plus measured
+bidirectional rates and the sample duration. The first four sequence bytes and
+the v1 report remain readable so a v2 node can reply to an old peer in the old
+wire format. A v2 request sent to an old node is safely ignored if that node
+only echoes the payload. Both directions remain independent and are never
+copied across connections.
+
+This is an observed and window-limited throughput reference, not measured
+physical capacity, unused headroom or an active speed test. Initial/app-limited
+congestion windows can still underestimate a fast link before the transport
+learns its path. A windowless path can be faster than the last validated
+saturation sample; without a probe or sufficiently heavy natural traffic its
+remaining headroom is unobservable.
+TCP terminated by a CDN/proxy supplies that leg's window and RTT; it cannot
+establish the capacity of an unobserved proxy backhaul.
+These paths continue to display the best-effort numeric estimate whenever valid
+window telemetry is available; forwarding alone never makes it unknown.
+Hyper-V and cloud virtual NICs use the same socket/QUIC telemetry as physical
+NICs. No adapter link-speed value is used as capacity or as an estimate cap.
+Hypervisor limits and cloud burst allowances are not separately modeled.
+Both nodes need the updated binary for two-sided window reporting; updating only
+the web frontend cannot add window telemetry to an old node.
+Connection reconciliation may replace TCP/QUIC with UDP/WireGuard or another
+transport that has no congestion-window telemetry. That new connection remains
+unknown until it observes recent natural saturation; estimates are never copied
+across connections or retained after a socket closes.
+
+On Windows, the `Windows TCP transmission window` trace event records the raw
+`SIO_TCP_INFO` cwnd, peer send allowance, MSS, RTT and socket endpoints. Both
+`Cwnd` and `SndWnd` are byte counts; MSS is not multiplied into either field.
+These diagnostics distinguish a genuinely small sender window from a unit or
+RTT error. An idle sender's small congestion window is not evidence that a
+1 Gbit/s Ethernet connection negotiated a lower speed. No adapter speed is
+substituted for an unmeasured end-to-end capacity.
+
+The shared status table combines cumulative upload/download into one Total
+Traffic column, with upload and download on separate lines. Bandwidth Reference
+follows it in the same two-line format, before Loss Rate.
+
+Parallel pools do not add per-connection window estimates together: their
+windows can share the same physical bottleneck, so the sum is not a link-capacity
+measurement. The peer row prefers the default active connection, using another
+active connection only if the preferred one has no valid estimate in either
+direction. Both directions always come from that one connection; a missing
+direction remains unknown. Closed connections and standby paths outside an
+active pool do not supply these metrics. Idle or differently loaded senders can
+still produce asymmetric estimates on a symmetric gigabit link. A UI tooltip
+explains this limitation; no physical-capacity cap or mirrored direction is
+invented. Cumulative traffic counters continue to aggregate all connections.
+
+Latency prefers a successful RTT from the default active connection and falls
+back to the lowest valid RTT among active members. Closed/standby connections
+and zero or invalid RTTs are excluded. Each physical connection retains its own
+Ping/Pong exchange; the packets bypass parallel business-data reordering and
+traffic-style pacing. The UI shows only the active multiplier after the protocol
+name, without a separate parallel-status column. Diagnostic pool state remains
+available from the management API.
+
+## Dashboard Globe
+
+The dashboard collects every running network for each managed machine, with
+at most four remote collection requests in flight. Only live connection
+records form links; a multi-hop route is not treated as a direct connection.
+Nodes are identified by runtime network name and peer ID. Multiple tunnels,
+underlay addresses and copied instance IDs do not create additional nodes.
+The network count is the number of distinct runtime networks, not instances
+across machines.
+
+The dashboard polls about every two seconds after a completed collection.
+It limits each request to eight seconds, retries transient per-machine failures
+twice, and buffers the last good machines/snapshots for up to 60 seconds.
+An independent expiry timer keeps this limit during long collection batches.
+Confirmed stopped instances are removed immediately. Cached data is marked stale and is never sampled as
+new traffic; switching servers clears both snapshot and counter caches.
+An incomplete-data warning appears only after a running machine has not
+successfully reported for a continuous minute, and clears on recovery.
+Camera orientation, zoom, selected node and automatic rotation are stored in
+a scoped 180-day preference cookie. A separate browser-local archive keeps
+minimal last-known node/link metadata for seven days, never credentials,
+configuration, byte counters or real-time rates. Archived nodes are restored
+only after a successful authorized machine listing, filtered by currently
+running instances, and marked stale; they never generate traffic particles.
+Real-time bit/s is derived from cumulative connection byte counters.
+Two endpoint reports do not double-count the same link; concurrent tunnels
+are aggregated. Missing/reset counters do not create invented rates.
+
+GeoIP is resolved from the running node's STUN/public IP, never the web or
+config-server connection address. Device lists reuse the session's resolved
+node-location cache, with background refresh attempts limited to once per
+minute per session and four concurrent requests. Opening the device list
+directly also warms this cache without blocking its response.
+IPv4 is preferred for display when available, regardless of STUN list order.
+City lookup first uses the node's IPv4 and falls back to its IPv6 if needed;
+using an IPv6 city result does not change the IPv4 address displayed.
+GeoIP coordinates are preferred. Country-only results use an explicitly
+approximate country location derived from the embedded Natural Earth map.
+Unknown locations remain in the node list instead of receiving invented
+coordinates. City-level lookup now uses an independent online-populated
+SQLite cache with automatic refresh, expiry, quotas and offline fallback.
+See `docs/city-geolocation.md` for privacy, providers and configuration.
+The embedded DB-IP Country Lite database remains the offline fallback.
+`--geoip-db` can still supply a local city-level MMDB.
+
+The Three.js globe loads on demand, pauses automatic rotation during direct
+manipulation and has no post-drag inertia. Zoom selects 24k/96k/288k point-cloud
+levels with equal-area land/ocean point distributions. Country/coastline
+boundaries switch between real 110m/50m/10m source detail and increasingly
+fine spherical subdivisions on zoom. Higher-detail assets load on demand. Its
+viewport uses a desktop golden-ratio layout and releases rendering resources
+when the dashboard closes.
+The default and reset view center near Hong Kong (22.3 N, 114.17 E);
+saved camera preferences take precedence on reopening. Clicking the selected
+node again clears its highlight/detail panel without moving the camera,
+and the cleared selection is persisted too.
+The node panel matches the map height and scrolls internally. At close zoom,
+decluttered labels show node names earlier (camera distance <= 2.8), and
+both measured traffic directions only at close zoom (distance <= 1.7).
+Traffic labels use a cross layout: endpoint names flank the bidirectional
+arrow, with the corresponding directional rates above and below the arrow.
+A compact footer shows the mean measured round-trip latency (RTT), separate
+from the directional rates; missing measurements remain unknown.
+Automatic collection leaves the refresh control idle; only a requested manual
+refresh shows its loading state. Labels and their connectors retain their DOM
+identity, dimensions and previous attachment during polling, with names/rates/RTT
+updated in place. Only departed nodes and links remove their labels.
+Traffic connectors are two pixels wide with higher contrast.
+Device names in the same reported city form one stable vertical column.
+Links between the same two geographic city groups share another vertical
+column, while retaining each device pair's separate rates, RTT and emitters.
+Each column has one short shared connector. Long columns shrink by complete
+rows and scroll internally instead of scattering, hiding or merging their
+members. Scrolling a column does not zoom the globe.
+Labels try multiple visible anchors along their own link and both sides of
+its projected tangent, with at most a 48-pixel traffic connector (32 pixels
+for node names). They avoid other labels, node markers and existing label
+connectors. A valid previous attachment is preferred to prevent jitter.
+Selected-node links take precedence; labels that cannot fit locally are
+hidden instead of being pushed into distant rows.
+Flow particles move in both directions. One-shot emission frequency is
+independent of RTT and of all other links. It uses the same soft display
+curve per direction: `6 * sqrt(bps / 16000000) / (1 + sqrt(bps / 16000000))`.
+Two Mbit/s is about 1.6 dots/second, twenty Mbit/s about 3.2 dots/second,
+and very large rates approach six dots/second without a hard saturation
+threshold. Dot frequency is a compressed visual indicator, not a linear
+byte/packet count; the labels retain the actual measured bit/s.
+Sparse traffic is not rounded up to a minimum continuous stream. Faster
+links have fewer particles in flight at equal throughput, not a higher
+emission frequency. Each device pair and direction owns its own emitter
+and RTT-derived speed even when several paths coincide on the map. Only
+parallel tunnels belonging to the same device pair are aggregated.
+Travel time follows the mean valid RTT of fresh open channels, expanded
+twentyfold and bounded to 0.08-6 seconds for display. Latency ratios are
+preserved within those limits; a missing RTT uses a conservative five-second
+animation fallback. Particles retire at arrival instead of looping, and
+fractional emissions/in-flight progress survive display rebuilds.
+This is a visual timing scale, not individual-packet tracing. Zero/unknown/stale directions
+do not show fabricated moving particles. Attribution is in the About dialog.
+
+## Verification
+
+- Core window math, telemetry and framing: `cargo test -p easytier-core --lib tunnel::`
+- Bidirectional/legacy Ping compatibility: `cargo test -p easytier-core --lib peers::conn::peer_conn_ping::tests`
+- Native TCP telemetry: `cargo test -p easytier --lib socket::tcp::window::tests`
+- Node IP selection: `cargo test -p easytier-web node_public_ip`
+- GeoIP and location cache: `cargo test -p easytier-web location`
+- Online city cache: `cargo test -p easytier-web geolocation`
+- All frontend and CI script unit tests: `pnpm test:unit`
+- Shared status/config unit tests: `pnpm --dir easytier-web/frontend-lib test:config-ui`
+- Web dashboard/globe unit tests: `pnpm --dir easytier-web/frontend test:unit`
+- GUI bridge/composable unit tests: `pnpm --dir easytier-gui test:unit`
+- Web build: `pnpm --dir easytier-web/frontend build`
+- Browser QA (builds assets and starts a preview): `pnpm --dir easytier-web/frontend test:dashboard`.
+
+Install workspace dependencies with `pnpm install` before running frontend
+tests. The shared-library unit entrypoint generates the protobuf TypeScript
+bindings, and the Web and GUI entrypoints rebuild the shared library before
+importing its package exports. The root unit command runs these steps in
+sequence and does not require Chromium, a running server or a native GUI session.
+
+Browser QA requires Playwright, PNGJS and a Chromium installation. It can use
+bundled runtimes via `PLAYWRIGHT_MODULE`, `PNGJS_MODULE` and
+`CHROMIUM_EXECUTABLE`; `DASHBOARD_URL` defaults to `http://127.0.0.1:5187`.
+The test intercepts API responses with fixtures and checks desktop/mobile
+continent pixels, animation, selection, layout, browser errors and empty state.
+Screenshots are written under the system temporary directory by default.

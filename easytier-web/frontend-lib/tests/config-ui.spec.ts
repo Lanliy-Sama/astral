@@ -1,0 +1,1128 @@
+import { mount, type VueWrapper } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
+import { defineComponent, h, nextTick, reactive } from 'vue'
+import Config from '../src/components/Config.vue'
+import { ScalarType } from '@protobuf-ts/runtime'
+import type { FlagMeta } from '../src/generated/proto/annotations'
+import { NetworkConfig as NetworkConfigPb } from '../src/generated/proto/api_manage'
+import { Flags as FlagsPb } from '../src/generated/proto/common'
+import { PRIVATE_MODE_DEFAULT_CAPABILITY } from '../src/modules/capabilities'
+import {
+  DEFAULT_NETWORK_CONFIG,
+  normalizeNetworkConfig,
+  toBackendNetworkConfig,
+  type NetworkConfig,
+} from '../src/types/network'
+
+/** The flags the management API carries, so a form's value reaches the backend. */
+function apiCarries(field: string): boolean {
+  return NetworkConfigPb.fields.some((declared) => declared.name === field)
+}
+
+/**
+ * The checkboxes the form is expected to offer, read off the schema the way a
+ * config form reads it: every boolean flag it declares that the management API
+ * carries, less the deprecated ones and the flags with a dedicated selector,
+ * plus the one network option the form adds itself.
+ */
+const CONFIG_FLAG_FIELDS = [
+  ...FlagsPb.fields.flatMap((flag) => {
+    const meta = flag.options?.['easytier.flag'] as FlagMeta | undefined
+    if (!meta || meta.deprecated) return []
+    if (flag.kind !== 'scalar' || flag.T !== ScalarType.BOOL) return []
+    const field = (meta.api?.field ?? flag.name) as keyof NetworkConfig
+    if (!apiCarries(field)) return []
+    if (['only_use_wss_http3_for_hole_punching', 'prefer_wss_http3_for_p2p', 'disable_wss_http3_for_p2p'].includes(field)) return []
+
+    return [field]
+  }),
+] as const satisfies readonly (keyof NetworkConfig)[]
+
+const CONFIG_CHECKBOX_FIELDS = [
+  ['dhcp', '#virtual_ip_auto'],
+  ...CONFIG_FLAG_FIELDS.map((field) => [field, `#${field}`] as const),
+] as const satisfies readonly (readonly [keyof NetworkConfig, string])[]
+
+const CONFIG_TOGGLE_FIELDS = [
+  'enable_relay_network_whitelist',
+  'enable_manual_routes',
+  'enable_socks5',
+] as const satisfies readonly (keyof NetworkConfig)[]
+
+const CONFIG_UI_BOOLEAN_FIELDS = [
+  ...CONFIG_CHECKBOX_FIELDS.map(([field]) => field),
+  ...CONFIG_TOGGLE_FIELDS,
+] as const satisfies readonly (keyof NetworkConfig)[]
+
+vi.mock('vue-i18n', () => ({
+  useI18n: () => ({
+    t: (key: string, values?: unknown[]) => values ? `${key}:${values.join(',')}` : key,
+  }),
+}))
+
+const PassThrough = defineComponent({
+  name: 'PassThrough',
+  setup(_, { slots }) {
+    return () => h('div', slots.default?.())
+  },
+})
+
+const PanelStub = defineComponent({
+  name: 'Panel',
+  props: {
+    header: String,
+  },
+  setup(props, { slots }) {
+    return () => h('section', { 'data-stub': 'panel', 'data-header': props.header }, slots.default?.())
+  },
+})
+
+const DividerStub = defineComponent({
+  name: 'Divider',
+  setup() {
+    return () => h('hr', { 'data-stub': 'divider' })
+  },
+})
+
+function splitList(value: string): string[] {
+  return value.split(',').map((item) => item.trim()).filter((item) => item.length > 0)
+}
+
+const InputTextStub = defineComponent({
+  name: 'InputText',
+  props: {
+    modelValue: [String, Number],
+    id: String,
+    disabled: Boolean,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.id,
+      disabled: props.disabled,
+      value: props.modelValue ?? '',
+      'data-stub': 'input-text',
+      onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).value),
+    })
+  },
+})
+
+const PasswordStub = defineComponent({
+  name: 'Password',
+  props: {
+    modelValue: [String, Number],
+    id: String,
+    disabled: Boolean,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.id,
+      disabled: props.disabled,
+      type: 'password',
+      value: props.modelValue ?? '',
+      'data-stub': 'password',
+      onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).value),
+    })
+  },
+})
+
+const InputNumberStub = defineComponent({
+  name: 'InputNumber',
+  props: {
+    modelValue: Number,
+    id: String,
+    inputId: String,
+    disabled: Boolean,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.id ?? props.inputId,
+      disabled: props.disabled,
+      type: 'number',
+      value: props.modelValue ?? '',
+      'data-stub': 'input-number',
+      onInput: (event: Event) => {
+        const value = (event.target as HTMLInputElement).value
+        emit('update:modelValue', value === '' ? null : Number(value))
+      },
+    })
+  },
+})
+
+const CheckboxStub = defineComponent({
+  name: 'Checkbox',
+  props: {
+    modelValue: Boolean,
+    inputId: String,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.inputId,
+      checked: props.modelValue,
+      type: 'checkbox',
+      'data-stub': 'checkbox',
+      onChange: (event: Event) => emit('update:modelValue', (event.target as HTMLInputElement).checked),
+    })
+  },
+})
+
+const ToggleButtonStub = defineComponent({
+  name: 'ToggleButton',
+  props: {
+    modelValue: Boolean,
+    onIcon: String,
+    offIcon: String,
+    onLabel: String,
+    offLabel: String,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { emit }) {
+    return () => h('button', {
+      type: 'button',
+      'aria-pressed': String(Boolean(props.modelValue)),
+      'data-stub': 'toggle-button',
+      onClick: () => emit('update:modelValue', !props.modelValue),
+    }, props.modelValue ? props.onLabel : props.offLabel)
+  },
+})
+
+const AutoCompleteStub = defineComponent({
+  name: 'AutoComplete',
+  props: {
+    modelValue: Array,
+    id: String,
+    multiple: Boolean,
+  },
+  emits: ['update:modelValue', 'complete'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.id,
+      value: (props.modelValue ?? []).join(','),
+      'data-stub': 'auto-complete',
+      onInput: (event: Event) => emit('update:modelValue', splitList((event.target as HTMLInputElement).value)),
+    })
+  },
+})
+
+const MultiSelectStub = defineComponent({
+  name: 'MultiSelect',
+  props: {
+    modelValue: Array,
+    inputId: String,
+    appendTo: String,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.inputId,
+      'data-append-to': props.appendTo,
+      value: (props.modelValue ?? []).join(','),
+      'data-stub': 'multi-select',
+      onInput: (event: Event) => emit('update:modelValue', splitList((event.target as HTMLInputElement).value)),
+    })
+  },
+})
+
+const SelectStub = defineComponent({
+  name: 'Select',
+  props: {
+    modelValue: [String, Object],
+    inputId: String,
+    options: Array,
+    optionLabel: String,
+    optionValue: String,
+    disabled: Boolean,
+    placeholder: String,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    const valueOf = (option: unknown) => {
+      if (option === null || typeof option !== 'object') return option
+      const record = option as Record<string, unknown>
+      return props.optionValue ? record[props.optionValue] : record
+    }
+    return () => h('select', {
+      ...attrs,
+      id: props.inputId,
+      disabled: props.disabled,
+      'data-stub': 'select',
+      value: props.modelValue ?? '',
+      onChange: (event: Event) => emit('update:modelValue', (event.target as HTMLSelectElement).value),
+    }, [
+      ...(props.placeholder ? [h('option', { value: '' }, props.placeholder)] : []),
+      ...(props.options ?? []).map((option) => {
+        const value = valueOf(option)
+        const label = typeof option === 'object' && option !== null && props.optionLabel
+          ? String((option as Record<string, unknown>)[props.optionLabel])
+          : String(option)
+        return h('option', { value: value === undefined || value === null ? '' : String(value) }, label)
+      }),
+    ])
+  },
+})
+
+const DataTableStub = defineComponent({
+  name: 'DataTable',
+  props: {
+    value: Array,
+    dataKey: String,
+    size: String,
+    empty: String,
+  },
+  setup(props, { slots }) {
+    return () => h('table', { 'data-stub': 'data-table' }, [
+      h('tbody', (props.value ?? []).map((row, index) =>
+        h('tr', { 'data-index': index }, slots.default?.()),
+      )),
+    ])
+  },
+})
+
+const ColumnStub = defineComponent({
+  name: 'Column',
+  props: {
+    field: String,
+    header: String,
+  },
+  setup(props, { slots }) {
+    return () => h('td', { 'data-field': props.field, 'data-header': props.header }, slots.body?.({ data: {}, index: 0 }) ?? '')
+  },
+})
+
+const UrlListInputStub = defineComponent({
+  name: 'UrlListInput',
+  props: {
+    modelValue: Array,
+    id: String,
+    addLabel: String,
+    protos: Object,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.id,
+      value: (props.modelValue ?? []).join(','),
+      'data-stub': 'url-list-input',
+      'data-add-label': props.addLabel,
+      onInput: (event: Event) => emit('update:modelValue', splitList((event.target as HTMLInputElement).value)),
+    })
+  },
+})
+
+const SelectButtonStub = defineComponent({
+  name: 'SelectButton',
+  props: {
+    modelValue: String,
+    options: Array,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    const optionValue = (option: unknown) => typeof option === 'string' ? option : (option as { value?: string }).value ?? ''
+    const optionLabel = (option: unknown) => typeof option === 'string' ? option : (option as { label?: string }).label ?? ''
+    return () => h('select', {
+      ...attrs,
+      id: (attrs as { id?: string }).id,
+      value: props.modelValue,
+      'data-stub': 'select-button',
+      onChange: (event: Event) => emit('update:modelValue', (event.target as HTMLSelectElement).value),
+    }, (props.options ?? []).map((option) => h('option', { value: optionValue(option) }, optionLabel(option))))
+  },
+})
+
+const ButtonStub = defineComponent({
+  name: 'Button',
+  props: {
+    label: String,
+    icon: String,
+    disabled: Boolean,
+  },
+  emits: ['click'],
+  setup(props, { attrs, slots, emit }) {
+    return () => h('button', {
+      ...attrs,
+      type: 'button',
+      disabled: props.disabled,
+      'data-label': props.label ?? props.icon,
+      onClick: (event: MouseEvent) => emit('click', event),
+    }, slots.default?.() ?? props.label ?? props.icon)
+  },
+})
+
+const DialogStub = defineComponent({
+  name: 'Dialog',
+  props: {
+    visible: Boolean,
+  },
+  setup(props, { slots }) {
+    return () => h('div', { hidden: !props.visible, 'data-stub': 'dialog' }, [
+      slots.default?.(),
+      slots.footer?.(),
+    ])
+  },
+})
+
+const AclManagerStub = defineComponent({
+  name: 'AclManager',
+  props: {
+    modelValue: Object,
+  },
+  emits: ['update:modelValue'],
+  setup(props) {
+    return () => h('pre', { 'data-stub': 'acl-manager' }, JSON.stringify(props.modelValue))
+  },
+})
+
+function makeConfig(): NetworkConfig {
+  const config = DEFAULT_NETWORK_CONFIG()
+
+  return {
+    ...config,
+    dhcp: false,
+    virtual_ipv4: '10.1.2.3',
+    network_length: 24,
+    network_name: 'mesh-a',
+    network_secret: 'secret-a',
+    peer_urls: ['tcp://peer-a:11010', 'udp://peer-b:11010'],
+    latency_first: true,
+    use_smoltcp: true,
+    disable_ipv6: true,
+    no_tun: true,
+    hostname: 'host-a',
+    sni: 'www.cloudflare.com',
+    p2p_disguise_mode: undefined,
+    only_use_wss_http3_for_hole_punching: true,
+    prefer_wss_http3_for_p2p: false,
+    disable_wss_http3_for_p2p: false,
+    proxy_cidrs: ['10.10.0.0/16', '172.16.1.0/24'],
+    vpn_portal_config: {
+      wireguard_listen: '0.0.0.0:22023',
+      wireguard_private_key: 'portal-private-key',
+      clients: [{
+        name: 'phone-a',
+        virtual_ip: '10.1.2.10/24',
+        groups: ['ops'],
+      }],
+    },
+    listener_urls: ['tcp://0.0.0.0:12010'],
+    dev_name: 'tun-test',
+    mtu: 1280,
+    instance_recv_bps_limit: '9007199254740993',
+    enable_relay_network_whitelist: true,
+    relay_network_whitelist: ['network-a'],
+    enable_manual_routes: true,
+    routes: ['192.168.0.0/16'],
+    enable_socks5: true,
+    socks5_port: 1086,
+    vpn: {
+      exit_enabled: false,
+      rules: [{ cidr: '0.0.0.0/0', exit_addr: '10.144.144.2' }],
+    },
+    mapped_listeners: ['tcp://127.0.0.1:22000'],
+    port_forwards: [{
+      proto: 'udp',
+      bind_ip: '0.0.0.0',
+      bind_port: 18080,
+      dst_ip: '10.0.0.2',
+      dst_port: 8080,
+    }],
+  }
+}
+
+function mountConfig(config: NetworkConfig = makeConfig(), runtimeCapabilities?: readonly string[]) {
+  const curNetwork = reactive(config) as NetworkConfig
+  const wrapper = mount(Config, {
+    props: {
+      curNetwork,
+      hostname: 'host-from-prop',
+      runtimeCapabilities,
+    },
+    global: {
+      directives: {
+        tooltip: (element: HTMLElement, binding: { value: string }) => {
+          element.setAttribute('data-tooltip', binding.value)
+        },
+      },
+      stubs: {
+        AclManager: AclManagerStub,
+        AutoComplete: AutoCompleteStub,
+        Button: ButtonStub,
+        Checkbox: CheckboxStub,
+        Dialog: DialogStub,
+        Divider: DividerStub,
+        InputGroup: PassThrough,
+        InputGroupAddon: PassThrough,
+        InputNumber: InputNumberStub,
+        InputText: InputTextStub,
+        MultiSelect: MultiSelectStub,
+        Panel: PanelStub,
+        Select: SelectStub,
+        DataTable: DataTableStub,
+        Column: ColumnStub,
+        Password: PasswordStub,
+        SelectButton: SelectButtonStub,
+        ToggleButton: ToggleButtonStub,
+        UrlListInput: UrlListInputStub,
+      },
+    },
+  })
+
+  return { curNetwork, wrapper }
+}
+
+function input(wrapper: VueWrapper, selector: string): HTMLInputElement {
+  return wrapper.find(selector).element as HTMLInputElement
+}
+
+async function setInput(wrapper: VueWrapper, selector: string, value: string) {
+  await wrapper.find(selector).setValue(value)
+  await nextTick()
+}
+
+describe('Config.vue network config projection', () => {
+  it.each([
+    { capabilities: [PRIVATE_MODE_DEFAULT_CAPABILITY], explicit: undefined, expected: true },
+    { capabilities: [], explicit: undefined, expected: false },
+    { capabilities: [PRIVATE_MODE_DEFAULT_CAPABILITY], explicit: false, expected: false },
+    { capabilities: [], explicit: true, expected: true },
+  ])('shows the target private mode default and preserves explicit values: %j', async ({ capabilities, explicit, expected }) => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.advanced_settings = true
+    config.enable_private_mode = explicit
+    const { curNetwork, wrapper } = mountConfig(config, capabilities)
+    await nextTick()
+    expect(input(wrapper, '#enable_private_mode').checked).toBe(expected)
+    expect(curNetwork.enable_private_mode).toBe(explicit)
+    wrapper.unmount()
+  })
+
+  it('shows a new custom VPN exit as enabled and allows explicitly disabling it', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.advanced_settings = true
+    const { curNetwork, wrapper } = mountConfig(config, ['config:vpn-subnet-exit-v1'])
+    await nextTick()
+    expect(input(wrapper, '#vpn_exit_enabled').checked).toBe(true)
+    expect(curNetwork.vpn?.exit_enabled).toBe(true)
+    await wrapper.find('#vpn_exit_enabled').setValue(false)
+    expect(curNetwork.vpn?.exit_enabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('uses a compact policy dropdown and one field on current custom kernels', async () => {
+    const { curNetwork, wrapper } = mountConfig(makeConfig(), ['config:p2p_disguise_mode'])
+    await nextTick()
+    const selector = wrapper.find('select#p2p_disguise_mode')
+    expect(selector.exists()).toBe(true)
+    expect(selector.attributes('data-stub')).toBe('select')
+    await selector.setValue('disabled')
+    expect(curNetwork.p2p_disguise_mode).toBe('disabled')
+    for (const field of ['only_use_wss_http3_for_hole_punching', 'prefer_wss_http3_for_p2p', 'disable_wss_http3_for_p2p'] as const) {
+      expect(curNetwork[field]).toBeUndefined()
+    }
+    expect(toBackendNetworkConfig(curNetwork, ['config:p2p_disguise_mode']).p2p_disguise_mode).toBe('disabled')
+    wrapper.unmount()
+  })
+
+  it('keeps every custom setting available when no runtime capability filter is supplied', async () => {
+    const { wrapper } = mountConfig()
+    await nextTick()
+
+    for (const field of ['close_redundant_conns_when_disguised', 'p2p_prefer_protocol', 'p2p_disguise_mode', 'sni']) {
+      expect(wrapper.find(`#${field}`).exists(), `${field} should be available for offline configuration`).toBe(true)
+      expect(wrapper.find(`#${field}`).attributes('disabled')).toBeUndefined()
+      expect(wrapper.find(`label[for="${field}"]`).exists()).toBe(true)
+    }
+    for (const field of ['only_use_wss_http3_for_hole_punching', 'prefer_wss_http3_for_p2p', 'disable_wss_http3_for_p2p']) {
+      expect(wrapper.find(`#${field}`).exists(), `${field} uses the dedicated disguise selector`).toBe(false)
+    }
+    for (const urls of wrapper.findAllComponents(UrlListInputStub)) {
+      expect(urls.props('protos')).toHaveProperty('http3')
+    }
+    wrapper.unmount()
+  })
+
+  it('removes unsupported custom controls, labels and help for official runtimes while keeping ordinary fields editable', async () => {
+    const config = makeConfig()
+    config.close_redundant_conns_when_disguised = true
+    const { curNetwork, wrapper } = mountConfig(config, [])
+    await nextTick()
+
+    for (const field of ['close_redundant_conns_when_disguised', 'p2p_prefer_protocol', 'p2p_disguise_mode', 'sni']) {
+      expect(wrapper.find(`#${field}`).exists(), `${field} should be absent for official runtimes`).toBe(false)
+      expect(wrapper.find(`label[for="${field}"]`).exists()).toBe(false)
+      expect(wrapper.find(`[data-tooltip="${field}_help"]`).exists()).toBe(false)
+    }
+    for (const field of CONFIG_FLAG_FIELDS.filter(field => field !== 'close_redundant_conns_when_disguised')) {
+      expect(input(wrapper, `#${field}`).disabled, `${field} should remain editable`).toBe(false)
+    }
+    for (const urls of wrapper.findAllComponents(UrlListInputStub)) {
+      expect(urls.props('protos')).not.toHaveProperty('http3')
+      expect(urls.props('protos')).toHaveProperty('wss')
+    }
+    await wrapper.find('#no_tun').setValue(false)
+    await setInput(wrapper, '#hostname', 'official-host')
+    expect(curNetwork.no_tun).toBe(false)
+    expect(curNetwork.hostname).toBe('official-host')
+    expect(curNetwork.sni).toBe('www.cloudflare.com')
+    expect(curNetwork.close_redundant_conns_when_disguised).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('shows individual supported extensions and updates the complete disguise selector when capabilities change', async () => {
+    const supported = ['config:sni', 'config:p2p_prefer_protocol', 'config:prefer_wss_http3_for_p2p']
+    const { curNetwork, wrapper } = mountConfig(makeConfig(), supported)
+    await nextTick()
+
+    for (const field of ['sni', 'p2p_prefer_protocol']) {
+      expect(wrapper.find(`#${field}`).exists()).toBe(true)
+      expect(wrapper.find(`#${field}`).attributes('disabled')).toBeUndefined()
+    }
+    expect(wrapper.find('#p2p_disguise_mode').exists()).toBe(false)
+    expect(wrapper.find('label[for="p2p_disguise_mode"]').exists()).toBe(false)
+    expect(wrapper.find('#close_redundant_conns_when_disguised').exists()).toBe(false)
+    await setInput(wrapper, '#sni', 'custom.example.com')
+    expect(curNetwork.sni).toBe('custom.example.com')
+
+    await wrapper.setProps({ runtimeCapabilities: [
+      ...supported,
+      'config:only_use_wss_http3_for_hole_punching',
+      'config:disable_wss_http3_for_p2p',
+      'config:close_redundant_conns_when_disguised',
+      'transport:http3-rfc9114-v2',
+    ] })
+    expect(wrapper.find('#p2p_disguise_mode').exists()).toBe(true)
+    expect(wrapper.find('#close_redundant_conns_when_disguised').exists()).toBe(true)
+    expect(wrapper.find('[data-tooltip="p2p_disguise_mode_help"]').exists()).toBe(true)
+    await wrapper.find('#p2p_disguise_mode').setValue('prefer')
+    expect(curNetwork.prefer_wss_http3_for_p2p).toBe(true)
+    expect(curNetwork.only_use_wss_http3_for_hole_punching).toBe(false)
+    for (const urls of wrapper.findAllComponents(UrlListInputStub)) {
+      expect(urls.props('protos')).toHaveProperty('http3')
+    }
+
+    await wrapper.setProps({ runtimeCapabilities: [] })
+    expect(wrapper.find('#sni').exists()).toBe(false)
+    expect(wrapper.find('#p2p_disguise_mode').exists()).toBe(false)
+    expect(wrapper.find('#close_redundant_conns_when_disguised').exists()).toBe(false)
+    expect(curNetwork.sni).toBe('custom.example.com')
+    wrapper.unmount()
+  })
+
+  it('shows preferred disguise, UDP and enabled cleanup for new and missing settings', async () => {
+    for (const legacy of [false, true]) {
+      const config = DEFAULT_NETWORK_CONFIG()
+      config.advanced_settings = true
+      if (legacy) {
+        delete config.p2p_disguise_mode
+        delete config.prefer_wss_http3_for_p2p
+        delete config.only_use_wss_http3_for_hole_punching
+        delete config.disable_wss_http3_for_p2p
+        delete config.p2p_prefer_protocol
+        delete config.close_redundant_conns_when_disguised
+      }
+      const { curNetwork, wrapper } = mountConfig(config)
+      await nextTick()
+      // The schema default prefers disguise, so both an explicitly defaulted
+      // and an unset configuration render as prefer.
+      expect(wrapper.find<HTMLSelectElement>('select#p2p_disguise_mode').element.value).toBe('prefer')
+      expect(wrapper.find<HTMLSelectElement>('select#p2p_prefer_protocol').element.value).toBe('udp')
+      expect(input(wrapper, '#close_redundant_conns_when_disguised').checked).toBe(true)
+      if (legacy) {
+        const backend = toBackendNetworkConfig(curNetwork)
+        for (const field of ['prefer_wss_http3_for_p2p', 'only_use_wss_http3_for_hole_punching', 'disable_wss_http3_for_p2p', 'p2p_prefer_protocol', 'close_redundant_conns_when_disguised'] as const) {
+          expect(curNetwork[field], `${field} should remain unset`).toBeUndefined()
+          expect(backend, `${field} should remain absent when saving`).not.toHaveProperty(field)
+        }
+      }
+      wrapper.unmount()
+    }
+  })
+
+  it('preserves explicitly saved TCP and disabled cleanup in the form', async () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.advanced_settings = true
+    config.p2p_prefer_protocol = 'tcp'
+    config.close_redundant_conns_when_disguised = false
+    const { curNetwork, wrapper } = mountConfig(config)
+    await nextTick()
+    expect(wrapper.find<HTMLSelectElement>('select#p2p_prefer_protocol').element.value).toBe('tcp')
+    expect(input(wrapper, '#close_redundant_conns_when_disguised').checked).toBe(false)
+    expect(curNetwork.p2p_prefer_protocol).toBe('tcp')
+    expect(curNetwork.close_redundant_conns_when_disguised).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('preserves saved DHCP subnet settings when editing the upstream IPv4 controls', async () => {
+    for (const dhcpv6 of [undefined, false, true]) {
+      const config = {
+        ...DEFAULT_NETWORK_CONFIG(),
+        virtual_ipv4: '10.10.0.2',
+        dhcp_ipv4_cidr: '10.10.0.0/24',
+        dhcpv6,
+        dhcp_ipv6_cidr: 'fd12::/64',
+      }
+      const { curNetwork, wrapper } = mountConfig(config)
+      await nextTick()
+
+      expect(input(wrapper, '#virtual_ip_auto').checked).toBe(true)
+      expect(input(wrapper, '#virtual_ip').disabled).toBe(true)
+      expect(wrapper.find('#dhcp_ipv4_cidr').exists()).toBe(false)
+      expect(wrapper.find('#dhcpv6').exists()).toBe(false)
+      expect(wrapper.find('#dhcp_ipv6_cidr').exists()).toBe(false)
+
+      await wrapper.find('#virtual_ip_auto').setValue(false)
+      expect(input(wrapper, '#virtual_ip').disabled).toBe(false)
+      await setInput(wrapper, '#virtual_ip', '10.10.0.3')
+
+      const backend = toBackendNetworkConfig(curNetwork)
+      expect(backend).toMatchObject({
+        dhcp: false,
+        virtual_ipv4: '10.10.0.3',
+        dhcp_ipv4_cidr: '10.10.0.0/24',
+        dhcp_ipv6_cidr: 'fd12::/64',
+      })
+      if (dhcpv6 === undefined) {
+        expect(backend).not.toHaveProperty('dhcpv6')
+      } else {
+        expect(backend.dhcpv6).toBe(dhcpv6)
+      }
+
+      await wrapper.find('#virtual_ip_auto').setValue(true)
+      expect(input(wrapper, '#virtual_ip').disabled).toBe(true)
+      expect(curNetwork.virtual_ipv4).toBe('10.10.0.3')
+      expect(toBackendNetworkConfig(curNetwork)).toMatchObject({
+        dhcp: true,
+        dhcp_ipv4_cidr: '10.10.0.0/24',
+        dhcp_ipv6_cidr: 'fd12::/64',
+      })
+      wrapper.unmount()
+    }
+  })
+
+  it('projects config values into the visible form controls', async () => {
+    const { curNetwork, wrapper } = mountConfig()
+    await nextTick()
+
+    expect(input(wrapper, '#network_name').value).toBe('mesh-a')
+    expect(input(wrapper, '#network_secret').value).toBe('secret-a')
+    expect(input(wrapper, '#virtual_ip').value).toBe('10.1.2.3')
+    expect(input(wrapper, '#initial_nodes').value).toBe('tcp://peer-a:11010,udp://peer-b:11010')
+    expect(input(wrapper, '#virtual_ip_auto').checked).toBe(false)
+    expect(input(wrapper, '#latency_first').checked).toBe(true)
+    expect(input(wrapper, '#use_smoltcp').checked).toBe(true)
+    expect(input(wrapper, '#disable_ipv6').checked).toBe(true)
+    expect(input(wrapper, '#no_tun').checked).toBe(true)
+
+    expect(input(wrapper, '#hostname').value).toBe('host-a')
+    expect(input(wrapper, '#sni').value).toBe('www.cloudflare.com')
+    expect(wrapper.find<HTMLSelectElement>('select#p2p_disguise_mode').element.value).toBe('only')
+    expect(input(wrapper, '#subnet-proxy').value).toBe('10.10.0.0/16,172.16.1.0/24')
+    expect(input(wrapper, '#vpn_portal_wireguard_listen').value).toBe('0.0.0.0:22023')
+    expect(input(wrapper, '#dev_name').value).toBe('tun-test')
+    expect(input(wrapper, '#mtu').value).toBe('1280')
+    expect(input(wrapper, '#instance_recv_bps_limit').value).toBe('9007199254740993')
+    expect(input(wrapper, '#relay_network_whitelist').value).toBe('network-a')
+    expect(input(wrapper, '#routes').value).toBe('192.168.0.0/16')
+    expect(input(wrapper, '#socks5_port').value).toBe('1086')
+    expect(input(wrapper, '#vpn_exit_enabled').checked).toBe(false)
+    expect(wrapper.find('#vpn_enabled').exists()).toBe(false)
+    expect(wrapper.find('#vpn_fail_mode').exists()).toBe(false)
+    expect(input(wrapper, 'input[data-add-label="add_listener_url"]').value).toBe('tcp://0.0.0.0:12010')
+    expect(input(wrapper, 'input[data-add-label="add_mapped_listener"]').value).toBe('tcp://127.0.0.1:22000')
+
+    expect(wrapper.find<HTMLSelectElement>('select#port_forward_proto').element.value).toBe('udp')
+    expect(input(wrapper, 'input[placeholder="port_forwards_bind_addr"]').value).toBe('0.0.0.0')
+    expect(input(wrapper, 'input[placeholder="port_forwards_dst_addr"]').value).toBe('10.0.0.2')
+    expect(wrapper.findComponent(AclManagerStub).props('modelValue')).toStrictEqual(curNetwork.acl)
+  })
+
+  it('flags invalid port-forward addresses inline and accepts IPv6', async () => {
+    const { curNetwork, wrapper } = mountConfig()
+    await nextTick()
+
+    const bindInput = wrapper.find('input[placeholder="port_forwards_bind_addr"]')
+    expect(bindInput.classes()).not.toContain('p-invalid')
+
+    await bindInput.setValue('999.0.0.1')
+    expect(bindInput.classes()).toContain('p-invalid')
+
+    await bindInput.setValue('fe80::1')
+    expect(bindInput.classes()).not.toContain('p-invalid')
+    expect(curNetwork.port_forwards[0].bind_ip).toBe('fe80::1')
+
+    await setInput(wrapper, 'input[placeholder="port_forwards_dst_addr"]', '2001:db8::2')
+    expect(curNetwork.port_forwards[0]).toMatchObject({
+      proto: 'udp',
+      bind_ip: 'fe80::1',
+      dst_ip: '2001:db8::2',
+    })
+    const backend = toBackendNetworkConfig(curNetwork)
+    expect(backend.port_forwards?.[0]).toMatchObject({ bind_ip: 'fe80::1', dst_ip: '2001:db8::2' })
+
+    // The compact editor's save stays disabled until it is editing a row
+    // whose addresses both parse.
+    const editorSave = wrapper.find('button[data-label="web.common.save"]')
+    expect(editorSave.exists()).toBe(true)
+    expect((editorSave.element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('edits a single exit per subnet and keeps values after deleting another rule', async () => {
+    const { curNetwork, wrapper } = mountConfig()
+    await wrapper.find('button[data-label="vpn_add_rule"]').trigger('click')
+    await setInput(wrapper, '#vpn_rule_cidr_1', '2001:db8::/32')
+    await setInput(wrapper, '#vpn_rule_exit_1', 'fd42::2')
+    expect(curNetwork.vpn?.rules[1]).toEqual({ cidr: '2001:db8::/32', exit_addr: 'fd42::2' })
+    await wrapper.findAll('button[aria-label="vpn_rule_remove"]')[0].trigger('click')
+    expect(input(wrapper, '#vpn_rule_cidr_0').value).toBe('2001:db8::/32')
+    expect(input(wrapper, '#vpn_rule_exit_0').value).toBe('fd42::2')
+    expect(toBackendNetworkConfig(curNetwork).vpn?.rules).toEqual([{ cidr: '2001:db8::/32', exit_addr: 'fd42::2' }])
+    await wrapper.find('button[aria-label="vpn_rule_remove"]').trigger('click')
+    expect(curNetwork.vpn?.rules).toEqual([])
+    expect(wrapper.find('#vpn_exit_enabled').exists()).toBe(true)
+  })
+
+  it('round-trips single-exit configuration and rejects removed JSON fields', () => {
+    const config = makeConfig()
+    expect(normalizeNetworkConfig(config).vpn).toEqual(config.vpn)
+    expect(toBackendNetworkConfig(config).vpn).toMatchObject({ rules: [{ cidr: '0.0.0.0/0', exit_addr: '10.144.144.2' }] })
+    for (const field of ['dns_protect', 'ipv6_protect', 'ignore_private', 'enabled', 'fail_mode', 'exits']) {
+      const legacy = makeConfig()
+      ;(legacy.vpn as any)[field] = false
+      expect(() => normalizeNetworkConfig(legacy)).toThrow()
+      expect(() => toBackendNetworkConfig(legacy)).toThrow()
+    }
+    for (const field of ['action', 'priority', 'exits', 'fallback_exits']) {
+      const legacy = makeConfig()
+      ;(legacy.vpn!.rules[0] as any)[field] = 'old'
+      expect(() => toBackendNetworkConfig(legacy)).toThrow()
+    }
+  })
+
+  it('projects form edits back into config and backend JSON', async () => {
+    const { curNetwork, wrapper } = mountConfig()
+    await nextTick()
+
+    await wrapper.find('#virtual_ip_auto').setValue(false)
+    await setInput(wrapper, '#network_name', 'mesh-edited')
+    await setInput(wrapper, '#network_secret', 'secret-edited')
+    await setInput(wrapper, '#virtual_ip', '10.7.7.7')
+    await setInput(wrapper, '#initial_nodes', ' tcp://peer-x:11010, , udp://peer-y:11010 ')
+    await wrapper.find('#no_tun').setValue(false)
+    await wrapper.find('#disable_ipv6').setValue(false)
+    await setInput(wrapper, '#hostname', 'host-edited')
+    await setInput(wrapper, '#sni', 'cdn.example.com')
+    await wrapper.find('select#p2p_disguise_mode').setValue('prefer')
+    await setInput(wrapper, '#subnet-proxy', '10.7.0.0/16,172.17.0.0/16')
+    await setInput(wrapper, '#vpn_portal_wireguard_listen', '[::]:23000')
+    await setInput(wrapper, 'input[data-add-label="add_listener_url"]', 'tcp://0.0.0.0:13010')
+    await setInput(wrapper, '#dev_name', 'tun-edited')
+    await setInput(wrapper, '#mtu', '1260')
+    await setInput(wrapper, '#instance_recv_bps_limit', '9007199254740993')
+    await setInput(wrapper, '#relay_network_whitelist', 'network-edited')
+    await setInput(wrapper, '#routes', '192.168.10.0/24')
+    await setInput(wrapper, '#socks5_port', '1089')
+    await wrapper.find('#vpn_exit_enabled').setValue(true)
+    await setInput(wrapper, 'input[data-add-label="add_mapped_listener"]', 'tcp://127.0.0.1:23000')
+    await wrapper.find('select#port_forward_proto').setValue('tcp')
+    await setInput(wrapper, 'input[placeholder="port_forwards_bind_addr"]', '127.0.0.1')
+    await setInput(wrapper, 'input[placeholder="port_forwards_dst_addr"]', '10.9.0.2')
+
+    const portNumbers = wrapper.findAll<HTMLInputElement>('input#horizontal-buttons')
+    await portNumbers[1].setValue('19090')
+    await portNumbers[2].setValue('9090')
+
+    expect(curNetwork).toMatchObject({
+      dhcp: false,
+      virtual_ipv4: '10.7.7.7',
+      network_name: 'mesh-edited',
+      network_secret: 'secret-edited',
+      peer_urls: ['tcp://peer-x:11010', 'udp://peer-y:11010'],
+      no_tun: false,
+      disable_ipv6: false,
+      hostname: 'host-edited',
+      sni: 'cdn.example.com',
+      p2p_disguise_mode: 'prefer',
+      proxy_cidrs: ['10.7.0.0/16', '172.17.0.0/16'],
+      vpn_portal_config: {
+        wireguard_listen: '[::]:23000',
+        wireguard_private_key: 'portal-private-key',
+        clients: [{
+          name: 'phone-a',
+          virtual_ip: '10.1.2.10/24',
+          groups: ['ops'],
+        }],
+      },
+      listener_urls: ['tcp://0.0.0.0:13010'],
+      dev_name: 'tun-edited',
+      mtu: 1260,
+      instance_recv_bps_limit: '9007199254740993',
+      relay_network_whitelist: ['network-edited'],
+      routes: ['192.168.10.0/24'],
+      socks5_port: 1089,
+      vpn: {
+        exit_enabled: true,
+        rules: [{ cidr: '0.0.0.0/0', exit_addr: '10.144.144.2' }],
+      },
+      mapped_listeners: ['tcp://127.0.0.1:23000'],
+      port_forwards: [{
+        proto: 'tcp',
+        bind_ip: '127.0.0.1',
+        bind_port: 19090,
+        dst_ip: '10.9.0.2',
+        dst_port: 9090,
+      }],
+    })
+
+    const backend = toBackendNetworkConfig(curNetwork)
+    expect(backend).toMatchObject({
+      virtual_ipv4: '10.7.7.7',
+      network_name: 'mesh-edited',
+      network_secret: 'secret-edited',
+      sni: 'cdn.example.com',
+      peer_urls: ['tcp://peer-x:11010', 'udp://peer-y:11010'],
+      listener_urls: ['tcp://0.0.0.0:13010'],
+      mtu: 1260,
+      instance_recv_bps_limit: '9007199254740993',
+      vpn: {
+        exit_enabled: true,
+        rules: [{ cidr: '0.0.0.0/0', exit_addr: '10.144.144.2' }],
+      },
+      vpn_portal_config: {
+        wireguard_listen: '[::]:23000',
+        wireguard_private_key: 'portal-private-key',
+        clients: [{
+          name: 'phone-a',
+          virtual_ip: '10.1.2.10/24',
+          groups: ['ops'],
+        }],
+      },
+      port_forwards: [{
+        proto: 'tcp',
+        bind_ip: '127.0.0.1',
+        bind_port: 19090,
+        dst_ip: '10.9.0.2',
+        dst_port: 9090,
+      }],
+    })
+  })
+
+  it('keeps the all-clear WSS/HTTP3 state distinct from prefer', async () => {
+    // All three disguise flags false means "never initiate disguised P2P";
+    // the UI must render it as its own state instead of collapsing it into
+    // prefer (which would flip the flag to true on the next save).
+    const config = makeConfig()
+    delete config.p2p_disguise_mode
+    config.only_use_wss_http3_for_hole_punching = false
+    config.prefer_wss_http3_for_p2p = false
+    config.disable_wss_http3_for_p2p = false
+
+    const { curNetwork, wrapper } = mountConfig(config)
+    await nextTick()
+
+    expect(wrapper.find<HTMLSelectElement>('select#p2p_disguise_mode').element.value).toBe('off')
+
+    // Selecting off stores one explicit policy and clears legacy overrides.
+    await wrapper.find('select#p2p_disguise_mode').setValue('off')
+    await nextTick()
+    expect(curNetwork.p2p_disguise_mode).toBe('off')
+    expect(curNetwork.prefer_wss_http3_for_p2p).toBeUndefined()
+    expect(curNetwork.disable_wss_http3_for_p2p).toBeUndefined()
+    expect(curNetwork.only_use_wss_http3_for_hole_punching).toBeUndefined()
+
+    await wrapper.find('select#p2p_disguise_mode').setValue('prefer')
+    await nextTick()
+    expect(curNetwork.p2p_disguise_mode).toBe('prefer')
+    expect(curNetwork.prefer_wss_http3_for_p2p).toBeUndefined()
+    expect(curNetwork.disable_wss_http3_for_p2p).toBeUndefined()
+    expect(curNetwork.only_use_wss_http3_for_hole_punching).toBeUndefined()
+  })
+
+  it('shows a flag the configuration does not state as the value the core resolves without setting it', async () => {
+    const config = makeConfig()
+    delete config.bind_device
+    delete config.multi_thread
+
+    const { curNetwork, wrapper } = mountConfig(config)
+    await nextTick()
+
+    // Both default to on, so an unset flag must not read as off.
+    expect(input(wrapper, '#bind_device').checked).toBe(true)
+    expect(input(wrapper, '#multi_thread').checked).toBe(true)
+    expect(curNetwork.bind_device).toBeUndefined()
+    expect(curNetwork.multi_thread).toBeUndefined()
+    const backend = toBackendNetworkConfig(curNetwork)
+    expect(backend).not.toHaveProperty('bind_device')
+    expect(backend).not.toHaveProperty('multi_thread')
+
+    // Toggling states the value, which is how a flag gets turned off.
+    await wrapper.find('#bind_device').setValue(false)
+    expect(curNetwork.bind_device).toBe(false)
+    expect(toBackendNetworkConfig(curNetwork).bind_device).toBe(false)
+  })
+
+  it('round-trips every visible boolean config control into backend JSON', async () => {
+    const config = makeConfig()
+    // A checkbox for a flag the API has no field for states a value that stops
+    // at the form; the rest have to arrive at the backend.
+    const reachesBackend = CONFIG_UI_BOOLEAN_FIELDS.filter(apiCarries)
+    const originalFlagValues = new Map(
+      CONFIG_UI_BOOLEAN_FIELDS.map((field, index) => {
+        const value = index % 2 === 0
+        config[field] = value
+        return [field, value]
+      }),
+    )
+
+    const { curNetwork, wrapper } = mountConfig(config)
+    await nextTick()
+
+    for (const [field, selector] of CONFIG_CHECKBOX_FIELDS) {
+      const value = originalFlagValues.get(field)
+      expect(input(wrapper, selector).checked, `${field} should project into UI`).toBe(value)
+      await wrapper.find(selector).setValue(!value)
+      await nextTick()
+    }
+
+    const toggleButtons = wrapper.findAll('button[data-stub="toggle-button"]')
+    expect(toggleButtons).toHaveLength(CONFIG_TOGGLE_FIELDS.length)
+    for (const [index, field] of CONFIG_TOGGLE_FIELDS.entries()) {
+      const value = originalFlagValues.get(field)
+      const toggle = toggleButtons[index]
+      expect(toggle.attributes('aria-pressed'), `${field} should project into UI`)
+        .toBe(String(value))
+      await toggle.trigger('click')
+      await nextTick()
+    }
+
+    const backend = toBackendNetworkConfig(curNetwork) as Record<string, unknown>
+    for (const [field, value] of originalFlagValues) {
+      const expectedValue = !value
+      expect(curNetwork[field], `${field} should update config`).toBe(expectedValue)
+      if (!reachesBackend.includes(field)) {
+        expect(backend[field], `${field} has no api.manage.NetworkConfig field`).toBeUndefined()
+        continue
+      }
+      expect(backend[field], `${field} should be preserved in backend JSON`).toBe(expectedValue)
+    }
+  })
+
+  it('generates a private key on enable and preserves devices across disable and reload', async () => {
+    const { curNetwork, wrapper } = mountConfig(DEFAULT_NETWORK_CONFIG())
+    await nextTick()
+    expect(input(wrapper, '#vpn_portal_enabled').checked).toBe(false)
+
+    await wrapper.find('#vpn_portal_enabled').setValue(true)
+    const key = curNetwork.vpn_portal_config!.wireguard_private_key!
+    expect(atob(key)).toHaveLength(32)
+    expect(curNetwork.vpn_portal_config!.wireguard_listen).toBe('0.0.0.0:22022')
+    expect(wrapper.find('#vpn_portal_wireguard_private_key').exists()).toBe(false)
+    expect(wrapper.find('#vpn_portal_client_name_0').exists()).toBe(false)
+    curNetwork.vpn_portal_config!.clients.push({ name: 'phone', virtual_ip: '10.0.0.2/24', groups: [] })
+
+    await wrapper.find('#vpn_portal_enabled').setValue(false)
+    expect(curNetwork.vpn_portal_config!.enabled).toBe(false)
+    const restored = normalizeNetworkConfig(toBackendNetworkConfig(curNetwork))
+    const reloaded = mountConfig(restored)
+    await nextTick()
+    expect(input(reloaded.wrapper, '#vpn_portal_enabled').checked).toBe(false)
+    await reloaded.wrapper.find('#vpn_portal_enabled').setValue(true)
+    expect(reloaded.curNetwork.vpn_portal_config).toMatchObject({
+      enabled: true,
+      wireguard_private_key: key,
+      clients: [{ name: 'phone', virtual_ip: '10.0.0.2/24' }],
+    })
+  })
+
+  it('preserves existing keys and completes older enabled configurations without one', async () => {
+    const original = makeConfig()
+    const existing = mountConfig(original)
+    await nextTick()
+    expect(existing.curNetwork.vpn_portal_config!.wireguard_private_key).toBe('portal-private-key')
+    const incomplete = makeConfig()
+    delete incomplete.vpn_portal_config!.wireguard_private_key
+    const generated = mountConfig(incomplete)
+    await nextTick()
+    expect(atob(generated.curNetwork.vpn_portal_config!.wireguard_private_key!)).toHaveLength(32)
+  })
+
+  it('keeps uint64 input editable without losing large values', async () => {
+    const { curNetwork, wrapper } = mountConfig()
+    await nextTick()
+
+    await setInput(wrapper, '#instance_recv_bps_limit', '1234')
+    expect(curNetwork.instance_recv_bps_limit).toBe(1234)
+
+    await setInput(wrapper, '#instance_recv_bps_limit', 'not-a-number')
+    expect(curNetwork.instance_recv_bps_limit).toBe(1234)
+
+    await setInput(wrapper, '#instance_recv_bps_limit', '0')
+    expect(curNetwork.instance_recv_bps_limit).toBe(0)
+    expect(input(wrapper, '#instance_recv_bps_limit').value).toBe('0')
+    expect(toBackendNetworkConfig(curNetwork).instance_recv_bps_limit).toBe('0')
+
+    await setInput(wrapper, '#instance_recv_bps_limit', '9007199254740993')
+    expect(curNetwork.instance_recv_bps_limit).toBe('9007199254740993')
+
+    await setInput(wrapper, '#instance_recv_bps_limit', '18446744073709551616')
+    expect(curNetwork.instance_recv_bps_limit).toBe('9007199254740993')
+
+    await setInput(wrapper, '#instance_recv_bps_limit', '')
+    expect(curNetwork.instance_recv_bps_limit).toBeNull()
+    expect(toBackendNetworkConfig(curNetwork)).not.toHaveProperty('instance_recv_bps_limit')
+  })
+
+  it('emits runNetwork with the current projected config', async () => {
+    const { curNetwork, wrapper } = mountConfig()
+    await nextTick()
+
+    await setInput(wrapper, '#network_name', 'mesh-running')
+    await wrapper.find('button[data-label="run_network"]').trigger('click')
+
+    expect(wrapper.emitted('runNetwork')?.[0]).toEqual([curNetwork])
+    expect((wrapper.emitted('runNetwork')?.[0][0] as NetworkConfig).network_name).toBe('mesh-running')
+  })
+
+  it('pairs SNI and traffic style and groups the disable option under feature switches', async () => {
+    const { curNetwork, wrapper } = mountConfig(DEFAULT_NETWORK_CONFIG())
+    await setInput(wrapper, '#parallel_connections', '5')
+    await wrapper.find('#disable_parallel_connections').setValue(true)
+    expect(input(wrapper, '#parallel_connections').disabled).toBe(true)
+    expect(curNetwork.parallel_connections).toBe(5)
+    await wrapper.find('#traffic_disguise').setValue('video')
+    const payload = toBackendNetworkConfig(curNetwork, ['config:parallel-connections-v1', 'config:traffic-disguise-v1'])
+    expect(payload.parallel_connections).toBe(5)
+    expect(payload.disable_parallel_connections).toBe(true)
+    expect(payload.traffic_disguise).toBe('video')
+    expect(wrapper.html().indexOf('id="sni"')).toBeLessThan(wrapper.html().indexOf('id="parallel_connections"'))
+    const sniField = wrapper.find('#sni').element.parentElement!
+    const styleField = wrapper.find('#traffic_disguise').element.parentElement!
+    expect(sniField.parentElement).toBe(styleField.parentElement)
+    expect(sniField.classList.contains('basis-5/12')).toBe(true)
+    expect(styleField.classList.contains('basis-5/12')).toBe(true)
+    const switches = wrapper.findAll('label').find(label => label.text() === 'flags_switch')!.element.parentElement!
+    expect(switches.contains(wrapper.find('#disable_parallel_connections').element)).toBe(true)
+    expect(switches.contains(wrapper.find('#parallel_connections').element)).toBe(false)
+    expect(wrapper.findAll('#disable_parallel_connections')).toHaveLength(1)
+    await wrapper.find('#disable_parallel_connections').setValue(false)
+    expect(input(wrapper, '#parallel_connections').disabled).toBe(false)
+    expect(curNetwork.parallel_connections).toBe(5)
+    wrapper.unmount()
+  })
+
+  it('hides all new controls for an official kernel', () => {
+    const { wrapper } = mountConfig(DEFAULT_NETWORK_CONFIG(), [])
+    for (const id of ['parallel_connections', 'disable_parallel_connections', 'traffic_disguise']) {
+      expect(wrapper.find(`#${id}`).exists()).toBe(false)
+    }
+    wrapper.unmount()
+  })
+})

@@ -1,0 +1,715 @@
+import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { mkdir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+
+const require = createRequire(import.meta.url)
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright')
+const { PNG } = require(process.env.PNGJS_MODULE || 'pngjs')
+const baseUrl = process.env.DASHBOARD_URL || 'http://127.0.0.1:5187'
+const output = process.env.DASHBOARD_QA_OUTPUT || join(tmpdir(), 'easytier-dashboard-qa')
+await mkdir(output, { recursive: true })
+const uuid = (id) => ({ part1: 0, part2: 0, part3: 0, part4: id })
+const uuidString = (id) => `00000000-0000-0000-0000-${id.toString(16).padStart(12, '0')}`
+const locations = [
+  { country: 'China', latitude: 31.2, longitude: 121.5 },
+  { country: 'New Zealand', latitude: -36.8, longitude: 174.7 },
+  { country: 'Singapore', latitude: 1.3, longitude: 103.8 },
+  { country: 'Unknown' },
+]
+const trafficStarted = Date.now()
+let jitter = false
+let colocated = false
+let hangNext = false
+let hungRoute
+let trafficScale = 1
+let collectionDelay = 0
+const machineItems = locations.map((location, index) => ({
+  client_url: `tcp://198.51.100.${index + 1}:11010`,
+  public_ip: `203.0.113.${index + 1}`,
+  online: true,
+  location,
+  info: {
+    machine_id: uuid(index + 1),
+    hostname: ['Shanghai', 'Auckland', 'Singapore', 'Unresolved'][index],
+    running_network_instances: [uuid(index + 11)],
+  },
+}))
+const snapshot = (index) => ({
+  running: true,
+  network_name: 'qa-mesh',
+  my_node_info: { peer_id: index + 1 },
+  node_location: {
+    public_ip: `203.0.113.${index + 1}`,
+    country: colocated ? 'China' : locations[index].country,
+    city: colocated ? 'Shanghai' : ['Shanghai', 'Auckland', 'Singapore', ''][index],
+    region: '',
+    latitude: colocated ? 31.2 : locations[index].latitude,
+    longitude: colocated ? 121.5 : locations[index].longitude,
+  },
+  routes: [0, 1, 2].filter(peer => peer !== index).map(peer => ({
+    peer_id: peer + 1, inst_id: uuidString(peer + 11), cost: 1,
+  })),
+  peers: [0, 1, 2].filter(peer => peer !== index).map(peer => ({
+    peer_id: peer + 1,
+    conns: [{
+      conn_id: uuidString(peer + 101), is_closed: false, tunnel: { tunnel_type: 'udp' },
+      stats: {
+        latency_us: String(index === 0 || peer === 0
+          ? (index === 1 || peer === 1 ? 5_000 : 50_000) : 150_000),
+        tx_bytes: String(Math.floor((Date.now() - trafficStarted) / 1000
+          * (index < peer ? 2_500_000 : 25_000) * trafficScale)),
+        rx_bytes: String(Math.floor((Date.now() - trafficStarted) / 1000
+          * (index < peer ? 25_000 : 2_500_000) * trafficScale)),
+      },
+    }],
+  })),
+})
+
+async function assertLocalLabelLayout(page, name) {
+  const layout = await page.locator('.globe-labels').evaluate(element => {
+    const stage = element.getBoundingClientRect()
+    if ([...element.querySelectorAll('.globe-label-stack, .globe-node-label, .globe-traffic-label')]
+      .some(card => getComputedStyle(card).display === 'none'))
+      throw new Error('Unplaced globe cards remain mounted with display:none')
+    return [...element.querySelectorAll('.globe-label-stack')]
+      .filter(stack => getComputedStyle(stack).display !== 'none')
+      .map(stack => {
+        const rect = stack.getBoundingClientRect()
+        return {
+          id: stack.getAttribute('data-stack-id'),
+          traffic: stack.classList.contains('globe-traffic-stack'),
+          x: rect.x - stage.x, y: rect.y - stage.y,
+          width: rect.width, height: rect.height,
+          scrollHeight: stack.scrollHeight, clientHeight: stack.clientHeight,
+          stageWidth: stage.width, stageHeight: stage.height,
+          leaderLength: Number.parseFloat(stack.previousElementSibling.style.width),
+          leaderThickness: Number.parseFloat(getComputedStyle(stack.previousElementSibling).height),
+          rows: [...stack.children].map(label => {
+            const row = label.getBoundingClientRect()
+            return { id: label.getAttribute('data-label-id'), x: row.x, y: row.y, height: row.height,
+              contained: row.height > 0 && row.left >= rect.left - 0.1 && row.right <= rect.right + 0.1
+                && row.top >= rect.top - 0.1 && row.bottom <= rect.bottom + 0.1 }
+          }),
+        }
+      })
+  })
+  assert.equal(new Set(layout.map(label => label.id)).size, layout.length, `${name}: duplicate link labels`)
+  const ids = layout.flatMap(stack => stack.rows.map(row => row.id))
+  assert.equal(new Set(ids).size, ids.length, `${name}: grouped labels merged or duplicated device links`)
+  layout.forEach((label, index) => {
+    assert.ok(label.scrollHeight <= label.clientHeight, `${name}: a mounted stack requires internal scrolling`)
+    label.rows.forEach((row, rowIndex) => {
+      assert.ok(row.contained, `${name}: a mounted card is clipped by its stack`)
+      assert.ok(Math.abs(row.x - label.rows[0].x) < 0.1, `${name}: grouped labels are not vertically aligned`)
+      if (rowIndex) {
+        const previous = label.rows[rowIndex - 1]
+        assert.ok(Math.abs(row.y - previous.y - previous.height - 4) < 0.1,
+          `${name}: grouped rows do not keep their vertical gap`)
+      }
+    })
+    assert.ok(label.leaderLength <= (label.traffic ? 48 : 32) + 0.1,
+      `${name}: a label connector stretched away from its link`)
+    if (label.traffic)
+      assert.ok(label.leaderThickness >= 2, `${name}: traffic connector is too thin`)
+    assert.ok(label.x >= 4.9 && label.y >= 4.9
+      && label.x + label.width <= label.stageWidth - 4.9
+      && label.y + label.height <= label.stageHeight - 33.9, `${name}: label exceeds stage bounds`)
+    for (const previous of layout.slice(0, index)) {
+      assert.equal(label.x < previous.x + previous.width + 3.5
+        && label.x + label.width + 3.5 > previous.x
+        && label.y < previous.y + previous.height + 3.5
+        && label.y + label.height + 3.5 > previous.y, false, `${name}: labels overlap`)
+    }
+  })
+  return layout
+}
+
+async function assertTrafficCardWheel(page, canvas, name) {
+  const distance = () => canvas.evaluate(element => Number(element.dataset.globeDistance))
+  for (const selector of ['.globe-flow-source-stat', '.globe-flow-target-stat',
+    '.globe-flow-latency-value', '.globe-flow-source', '.globe-flow-target']) {
+    const cardPart = page.locator(`.globe-traffic-label ${selector}`).first()
+    await cardPart.waitFor({ state: 'visible' })
+    assert.ok(await cardPart.getAttribute('title'), `${name}: ${selector} lost its hover title`)
+    await cardPart.hover()
+    const before = await distance()
+    const scroll = await page.evaluate(() => scrollY)
+    await page.mouse.wheel(0, 40)
+    await page.waitForFunction(previous => Number(document.querySelector('.globe-stage canvas')?.dataset.globeDistance) > previous, before)
+    const farther = await distance()
+    assert.equal(await page.evaluate(() => scrollY), scroll, `${name}: ${selector} zoom-out scrolled the page`)
+    await cardPart.hover()
+    await page.mouse.wheel(0, -40)
+    await page.waitForFunction(previous => Number(document.querySelector('.globe-stage canvas')?.dataset.globeDistance) < previous, farther)
+    assert.equal(await page.evaluate(() => scrollY), scroll, `${name}: ${selector} zoom-in scrolled the page`)
+  }
+}
+
+async function selectTheme(page, mode) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (await page.evaluate(() => localStorage.getItem('console-theme-mode')) === mode) break
+    await page.getByRole('button', { name: 'Theme (light / dark / system)', exact: true }).click()
+  }
+  assert.equal(await page.evaluate(() => localStorage.getItem('console-theme-mode')), mode)
+}
+
+async function canvasBrightness(canvas) {
+  const image = PNG.sync.read(await canvas.screenshot())
+  const median = (left, top, width, height) => {
+    const values = []
+    for (let y = Math.floor(image.height * top); y < image.height * (top + height); y++) {
+      for (let x = Math.floor(image.width * left); x < image.width * (left + width); x++) {
+        const offset = (y * image.width + x) * 4
+        values.push(image.data[offset] * 0.2126 + image.data[offset + 1] * 0.7152 + image.data[offset + 2] * 0.0722)
+      }
+    }
+    values.sort((a, b) => a - b)
+    return values[Math.floor(values.length / 2)]
+  }
+  return { background: median(0.02, 0.02, 0.05, 0.05), sphere: median(0.45, 0.45, 0.1, 0.1) }
+}
+
+async function assertMountedThemeChanges(page, canvas) {
+  const originalCanvas = await canvas.elementHandle()
+  const originalView = await canvas.evaluate(element => ({
+    distance: element.dataset.globeDistance, azimuth: element.dataset.globeAzimuth,
+  }))
+  const assertMode = async (dark, name) => {
+    await page.waitForFunction(expected => document.documentElement.classList.contains('app-dark') === expected, dark)
+    // CSS and the WebGL palette update on different callbacks; sample after both have rendered.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    const pixels = await canvasBrightness(canvas)
+    assert.ok(dark ? pixels.background < 100 : pixels.background > 180,
+      `${name}: canvas background did not adopt the theme (${pixels.background})`)
+    assert.ok(dark ? pixels.sphere < 100 : pixels.sphere > 160,
+      `${name}: globe sphere did not adopt the theme (${pixels.sphere})`)
+    assert.equal(await originalCanvas.evaluate(element => element === document.querySelector('.globe-stage canvas')), true,
+      `${name}: switching theme recreated the globe canvas`)
+    const view = await canvas.evaluate(element => ({
+      distance: element.dataset.globeDistance, azimuth: element.dataset.globeAzimuth,
+    }))
+    assert.deepEqual(view, originalView, `${name}: switching theme reset the camera`)
+    assert.equal(await page.locator('.node-row').filter({ hasText: 'Auckland' }).getAttribute('aria-pressed'), 'true',
+      `${name}: switching theme cleared the selected node`)
+    assert.equal(await page.getByRole('button', { name: 'Auto Rotate', exact: true }).count(), 1,
+      `${name}: switching theme resumed rotation`)
+  }
+  await assertMode(true, 'initial dark mode')
+  await selectTheme(page, 'light')
+  await assertMode(false, 'explicit light mode')
+  await page.locator('.console-page').screenshot({ path: join(output, 'desktop-light.png') })
+  await selectTheme(page, 'dark')
+  await assertMode(true, 'explicit dark mode')
+  await selectTheme(page, 'system')
+  await page.emulateMedia({ colorScheme: 'light' })
+  await assertMode(false, 'system light mode')
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await assertMode(true, 'system dark mode')
+  await selectTheme(page, 'dark')
+  await originalCanvas.dispose()
+  console.log('desktop: mounted globe follows explicit and system themes without resetting its view')
+}
+
+async function assertLightGlobeLabels(page) {
+  const colors = await page.locator('.globe-stage').evaluate(stage => {
+    const context = document.createElement('canvas').getContext('2d')
+    const rgba = color => {
+      context.clearRect(0, 0, 1, 1)
+      context.fillStyle = color
+      context.fillRect(0, 0, 1, 1)
+      return [...context.getImageData(0, 0, 1, 1).data]
+    }
+    const read = selector => {
+      const element = [...stage.querySelectorAll(selector)].find(element => element.getClientRects().length > 0)
+      if (!element) throw new Error(`No visible ${selector} available for theme verification`)
+      const style = getComputedStyle(element)
+      return { color: rgba(style.color), background: rgba(style.backgroundColor) }
+    }
+    return {
+      stage: rgba(getComputedStyle(stage).backgroundColor),
+      node: read('.globe-node-label'), traffic: read('.globe-traffic-label'),
+      legend: read('.globe-legend'), managed: read('.globe-legend .managed-dot'), peer: read('.globe-legend .peer-dot'),
+    }
+  })
+  const luminance = color => color.slice(0, 3).map(value => {
+    const channel = value / 255
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  }).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0)
+  const contrast = (first, second) => {
+    const a = luminance(first), b = luminance(second)
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
+  }
+  for (const name of ['node', 'traffic']) {
+    const label = colors[name]
+    const background = label.background.slice(0, 3).map((value, index) =>
+      value * label.background[3] / 255 + colors.stage[index] * (1 - label.background[3] / 255))
+    assert.ok(luminance(background) > 0.65, `light mode: ${name} label kept its dark background`)
+    assert.ok(contrast(label.color, background) >= 4.5, `light mode: ${name} label text lacks contrast`)
+  }
+  assert.ok(contrast(colors.legend.color, colors.stage) >= 4.5, 'light mode: legend text lacks contrast')
+  for (const name of ['managed', 'peer'])
+    assert.ok(contrast(colors[name].background, colors.stage) >= 3, `light mode: ${name} marker lacks contrast`)
+}
+
+let previewServer
+if (!process.env.DASHBOARD_URL) {
+  previewServer = spawn(process.execPath, ['node_modules/vite/bin/vite.js', 'preview', '--host', '127.0.0.1', '--port', '5187', '--strictPort'], { stdio: 'pipe' })
+  let ready = false
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (previewServer.exitCode !== null) throw new Error('Vite exited before starting the globe preview')
+    if (await fetch(baseUrl).then(response => response.ok).catch(() => false)) { ready = true; break }
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  if (!ready) { previewServer.kill(); throw new Error('Globe preview did not start') }
+}
+const browser = await chromium.launch({
+  executablePath: process.env.CHROMIUM_EXECUTABLE || undefined,
+  headless: true,
+  args: ['--use-gl=angle', `--use-angle=${process.env.CHROMIUM_ANGLE_BACKEND || 'swiftshader'}`, '--enable-unsafe-swiftshader'],
+})
+const errors = []
+const detailAssets = []
+let page
+try {
+  page = await browser.newPage({ colorScheme: 'dark' })
+  // Software WebGL can take several frames to settle during native build load.
+  page.setDefaultTimeout(60_000)
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', message => { if (message.text().includes('globe geography detail')) console.error(message.text()) })
+  for (const event of ['request', 'requestfinished', 'requestfailed']) {
+    page.on(event, request => {
+      if (request.url().includes('world-boundaries'))
+        detailAssets.push({ event, url: request.url(), error: request.failure()?.errorText, at: Date.now() })
+    })
+  }
+  let empty = false
+  await page.route('**/api/v1/**', async route => {
+    const pathname = new URL(route.request().url()).pathname
+    let body = {}
+    if (pathname.endsWith('/machines')) {
+      body = { machines: empty ? [] : machineItems }
+    } else if (pathname.endsWith('/console-info')) {
+      body = { username: 'globe-qa', webhook_auth: true, config_server_protocol: 'tcp', config_server_port: 22020 }
+    } else if (pathname.endsWith('/summary')) {
+      body = { device_count: empty ? 0 : machineItems.length }
+    } else if (pathname.endsWith('/networks/info')) {
+      assert.equal(route.request().method(), 'POST')
+      const id = Number.parseInt(pathname.match(/machines\/([^/]+)/)[1].replaceAll('-', ''), 16)
+      if (hangNext && id === 2) {
+        hangNext = false
+        hungRoute = route
+        return
+      }
+      if (jitter && id === 2) {
+        await route.fulfill({ status: 503, contentType: 'application/json', body: '{"message":"temporary"}' })
+        return
+      }
+      if (collectionDelay)
+        await new Promise(resolve => setTimeout(resolve, collectionDelay))
+      body = { info: { map: { [uuidString(id + 10)]: snapshot(id - 1) } } }
+    }
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) })
+  })
+  await page.addInitScript(() => {
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      localStorage.setItem('lang', 'en')
+      // Existing particle-color checks exercise dark mode; retain explicit choices across reloads.
+      if (!localStorage.getItem('console-theme-mode')) localStorage.setItem('console-theme-mode', 'dark')
+    }
+    const firstFrame = new MutationObserver(() => {
+      const canvas = document.querySelector('.globe-stage canvas')
+      const azimuth = canvas?.getAttribute('data-globe-azimuth')
+      if (azimuth !== null && azimuth !== undefined) {
+        window.__globeQaInitialAzimuth = Number(azimuth)
+        firstFrame.disconnect()
+      }
+    })
+    firstFrame.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-globe-azimuth'] })
+  })
+  const dashboardUrl = `${baseUrl}/#/h`
+  for (const [name, viewport] of [
+    ['desktop', { width: 1440, height: 1000 }],
+    ['mobile', { width: 390, height: 844 }],
+  ]) {
+    await page.goto('about:blank')
+    await page.context().clearCookies()
+    await page.setViewportSize(viewport)
+    await page.goto(dashboardUrl)
+    const canvas = page.locator('.globe-stage canvas')
+    await canvas.waitFor({ timeout: 60_000 })
+    await canvas.scrollIntoViewIfNeeded()
+    const defaultLongitude = 114.17 * Math.PI / 180
+    await page.waitForFunction(() => document.querySelector('.globe-stage canvas')?.hasAttribute('data-globe-azimuth'))
+    const initialAzimuth = await page.evaluate(() => window.__globeQaInitialAzimuth)
+    assert.ok(Math.abs(Math.atan2(Math.sin(initialAzimuth - defaultLongitude),
+      Math.cos(initialAzimuth - defaultLongitude))) < 0.08,
+    `${name}: default globe view is not centered near Hong Kong (${initialAzimuth})`)
+    await page.locator('.node-row').first().waitFor()
+    const summaries = await page.locator('.dashboard-summary strong').allTextContents()
+    assert.deepEqual(summaries, ['1', '6'], `${name}: machines sharing a mesh must count as one network`)
+    assert.deepEqual(await page.locator('.summary-strip .summary-value').allTextContents().then(values => values.map(value => value.trim())), ['4', '4', '4'], `${name}: official summary retains device and instance counts`)
+    const globeControls = await canvas.evaluate((element) => ({
+      rotateSpeed: Number(element.dataset.globeRotateSpeed),
+      zoomSpeed: Number(element.dataset.globeZoomSpeed),
+      minDistance: Number(element.dataset.globeMinDistance),
+      maxDistance: Number(element.dataset.globeMaxDistance),
+      cloudLevels: element.dataset.globeCloudLevels,
+      aspectRatio: getComputedStyle(element.parentElement).aspectRatio,
+    }))
+    assert.ok(globeControls.rotateSpeed > 0 && globeControls.rotateSpeed < 0.6,
+      `${name}: drag rotation should use a reduced, predictable sensitivity`)
+    assert.ok(globeControls.zoomSpeed > 0 && globeControls.zoomSpeed < 1,
+      `${name}: wheel/pinch zoom should not use an aggressive default speed`)
+    assert.ok(globeControls.minDistance < 1.7 && globeControls.maxDistance > 5,
+      `${name}: globe zoom range should expose a closer high-detail view`)
+    assert.equal(globeControls.cloudLevels, '48000,96000,288000',
+      `${name}: globe should advertise adaptive point cloud levels`)
+    const expectedAspect = name === 'desktop' ? '1.618' : '1.18'
+    assert.match(globeControls.aspectRatio, new RegExp(expectedAspect),
+      `${name}: globe stage should keep its responsive aspect ratio`)
+    await page.waitForTimeout(800)
+    const canvasSize = await canvas.evaluate(element => ({
+      width: element.clientWidth, height: element.clientHeight,
+      backingWidth: element.width, backingHeight: element.height,
+      renderer: (() => {
+        const gl = element.getContext('webgl2') || element.getContext('webgl')
+        const extension = gl?.getExtension('WEBGL_debug_renderer_info')
+        return extension && gl.getParameter(extension.UNMASKED_RENDERER_WEBGL)
+      })(),
+    }))
+    console.log(`${name}: canvas ${JSON.stringify(canvasSize)}`)
+    await page.waitForFunction(() => {
+      const canvas = document.querySelector('.globe-stage canvas')
+      return canvas?.dataset.globeBoundaryScale === '50m' && canvas.dataset.globeCloudLevel === '0'
+    }, undefined, { timeout: 60_000 })
+    assert.ok(Number(await canvas.getAttribute('data-globe-distance')) > 2.8,
+      `${name}: the default view must load the medium-resolution map without zooming`)
+    const first = await canvas.screenshot({ path: join(output, `${name}-default.png`) })
+    const image = PNG.sync.read(first)
+    let landPixels = 0
+    for (let i = 0; i < image.data.length; i += 4) {
+      const [r, g, b] = image.data.subarray(i, i + 3)
+      if (g > 90 && g > r * 1.25 && b > 60)
+        landPixels++
+    }
+    assert.ok(landPixels > 400, `${name}: globe has no visible continent point cloud`)
+    await page.waitForTimeout(1200)
+    assert.notDeepEqual(await canvas.screenshot(), first, `${name}: animation is static`)
+    await page.waitForFunction(() => {
+      const canvas = document.querySelector('.globe-stage canvas')
+      return Number(canvas?.getAttribute('data-globe-forward-particles')) > 0
+        && Number(canvas?.getAttribute('data-globe-reverse-particles')) > 0
+    })
+    assert.ok(Number(await canvas.getAttribute('data-globe-forward-emission-rate'))
+      > Number(await canvas.getAttribute('data-globe-reverse-emission-rate')) * 4,
+      `${name}: emission frequency must distinguish different directional traffic`)
+    const timings = JSON.parse(await canvas.getAttribute('data-globe-flow-timings'))
+      .filter(flow => JSON.parse(flow.key)[2] === false)
+      .sort((left, right) => left.travelSeconds - right.travelSeconds)
+    assert.equal(timings.length, 3)
+    assert.ok(timings.every(flow => flow.emissionsPerSecond < 6),
+      `${name}: busy links immediately saturated the emission density`)
+    assert.ok(Math.abs(timings[0].emissionsPerSecond - timings[2].emissionsPerSecond) < 0.1,
+      `${name}: equal throughput must emit equally despite different RTTs`)
+    assert.ok(Math.abs(timings[1].travelSeconds / timings[0].travelSeconds - 10) < 0.01,
+      `${name}: low-latency travel-time differences were compressed`)
+    await page.locator('.node-row').filter({ hasText: 'Auckland' }).click()
+    const lowBoundaryVertices = Number(await canvas.getAttribute('data-globe-boundary-source-vertices'))
+    await assert.doesNotReject(() => page.locator('.node-detail').waitFor())
+    assert.match(await page.locator('.node-detail').innerText(), /-36\.80/)
+    assert.ok(await page.locator('.node-list').evaluate(element => element.clientHeight) > 40,
+      `${name}: node details collapsed the node list`)
+    const panelHeight = await page.locator('.node-panel').evaluate(element => element.clientHeight)
+    const mapHeight = await page.locator('.globe-stage').evaluate(element => element.clientHeight)
+    assert.ok(Math.abs(panelHeight - mapHeight) <= 2,
+      `${name}: node panel must match the map height`)
+    if (name === 'mobile') {
+      assert.ok(await page.locator('.node-list').evaluate(element => element.scrollHeight > element.clientHeight),
+        'mobile: long node lists must scroll inside the fixed-height panel')
+    }
+    assert.equal(await page.locator('footer.geoip-attribution').count(), 0,
+      `${name}: geolocation source notice should not remain on the dashboard`)
+    await page.getByRole('button', { name: 'Pause Rotation', exact: true }).click()
+    await canvas.scrollIntoViewIfNeeded()
+    const box = await canvas.boundingBox()
+    const azimuthBefore = await canvas.getAttribute('data-globe-azimuth')
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + 24, box.y + box.height / 2, { steps: 5 })
+    await page.mouse.up()
+    await page.waitForTimeout(100)
+    const azimuthAfter = await canvas.getAttribute('data-globe-azimuth')
+    const angularChange = Math.abs(Math.atan2(
+      Math.sin(Number(azimuthAfter) - Number(azimuthBefore)),
+      Math.cos(Number(azimuthAfter) - Number(azimuthBefore)),
+    ))
+    assert.ok(angularChange > 0.015 && angularChange < 0.18, `${name}: a small drag caused excessive rotation`)
+    await page.waitForTimeout(300)
+    assert.equal(await canvas.getAttribute('data-globe-azimuth'), azimuthAfter,
+      `${name}: globe continued spinning after a manual drag`)
+    if (name === 'desktop') await assertMountedThemeChanges(page, canvas)
+    const motionBefore = PNG.sync.read(await canvas.screenshot())
+    let movingWhitePixels = 0
+    for (let attempt = 0; attempt < 6 && movingWhitePixels <= 2; attempt++) {
+      await page.waitForTimeout(250)
+      const motionAfter = PNG.sync.read(await canvas.screenshot())
+      movingWhitePixels = 0
+      for (let i = 0; i < motionBefore.data.length; i += 4) {
+        const before = motionBefore.data[i] > 230 && motionBefore.data[i + 1] > 230 && motionBefore.data[i + 2] > 230
+        const after = motionAfter.data[i] > 230 && motionAfter.data[i + 1] > 230 && motionAfter.data[i + 2] > 230
+        if (before !== after) movingWhitePixels++
+      }
+    }
+    assert.ok(movingWhitePixels > 2, `${name}: particle pixels did not move on the paused globe`)
+    const beforeCancellation = await canvas.getAttribute('data-globe-azimuth')
+    await page.locator('.node-row').filter({ hasText: 'Auckland' }).click()
+    assert.equal(await page.locator('.node-row.selected').count(), 0,
+      `${name}: clicking the selected node did not cancel selection`)
+    assert.equal(await page.locator('.node-detail').count(), 0,
+      `${name}: canceled selection left the detail panel visible`)
+    assert.equal(await page.locator('.node-row').filter({ hasText: 'Auckland' }).getAttribute('aria-pressed'), 'false')
+    assert.equal(await canvas.getAttribute('data-globe-azimuth'), beforeCancellation,
+      `${name}: canceling a node unexpectedly moved the camera`)
+    await page.locator('.node-row').filter({ hasText: 'Auckland' }).click()
+    assert.equal(await page.locator('.node-row').filter({ hasText: 'Auckland' }).getAttribute('aria-pressed'), 'true')
+    await canvas.scrollIntoViewIfNeeded()
+    const intermediateZoomBox = await canvas.boundingBox()
+    await page.mouse.move(intermediateZoomBox.x + intermediateZoomBox.width * 0.15,
+      intermediateZoomBox.y + intermediateZoomBox.height * 0.15)
+    for (let i = 0; i < 15 && Number(await canvas.getAttribute('data-globe-distance')) > 2.75; i++) {
+      await page.mouse.wheel(0, -150)
+      await page.waitForTimeout(50)
+    }
+    assert.ok(Number(await canvas.getAttribute('data-globe-distance')) > 1.7,
+      `${name}: intermediate zoom unexpectedly skipped the name-only phase`)
+    assert.ok(await page.locator('.globe-node-label').evaluateAll(elements =>
+      elements.some(element => getComputedStyle(element).display !== 'none')),
+    `${name}: node names must become visible before traffic labels`)
+    assert.ok(await page.locator('.globe-traffic-label').evaluateAll(elements =>
+      elements.every(element => getComputedStyle(element).display === 'none')),
+    `${name}: traffic labels became visible too early`)
+    const zoomBox = await canvas.boundingBox()
+    await page.mouse.move(zoomBox.x + zoomBox.width * 0.15, zoomBox.y + zoomBox.height * 0.15)
+    await page.mouse.wheel(0, -2500)
+    await page.waitForFunction(() => Number(document.querySelector('.globe-stage canvas')?.getAttribute('data-globe-distance')) <= 1.55)
+    await page.waitForFunction(() =>
+      document.querySelector('.globe-stage canvas')?.getAttribute('data-globe-cloud-level') === '2',
+    undefined, { timeout: 60_000 })
+    assert.equal(await canvas.getAttribute('data-globe-cloud-level'), '2',
+      `${name}: close zoom did not select the dense point cloud`)
+    assert.equal(await canvas.getAttribute('data-globe-boundary-scale'), '10m',
+      `${name}: close zoom did not select actual high-resolution boundary data`)
+    assert.ok(Number(await canvas.getAttribute('data-globe-boundary-source-vertices')) > lowBoundaryVertices * 5,
+      `${name}: zoom detail only subdivided old low-resolution boundaries`)
+    const stageBounds = await page.locator('.globe-stage').boundingBox()
+    assert.ok(stageBounds.x + stageBounds.width <= viewport.width + 1,
+      `${name}: globe stage exceeds the viewport`)
+    await page.waitForFunction(() => [...document.querySelectorAll('.globe-node-label')]
+      .some(element => getComputedStyle(element).display !== 'none'))
+    await page.waitForFunction(() => [...document.querySelectorAll('.globe-traffic-label')]
+      .some(element => getComputedStyle(element).display !== 'none' && element.textContent.includes('bit/s')))
+    assert.ok(await page.locator('.globe-traffic-label').evaluateAll(elements =>
+      elements.some(element => getComputedStyle(element).display !== 'none'
+        && element.querySelector('.traffic-endpoints')
+        && element.querySelector('.globe-flow-latency-value')?.textContent.match(/^RTT [\d.]+ ms$/)
+        && [...element.querySelectorAll('.globe-flow-stat')].every(stat => !stat.textContent.includes('RTT')))),
+    `${name}: traffic labels must keep directional rates separate from the RTT footer`)
+    await assertLocalLabelLayout(page, name)
+    const continuity = await page.locator('.globe-labels').evaluateHandle(layer => {
+      const tracked = [...layer.querySelectorAll('.globe-traffic-label')]
+        .filter(element => getComputedStyle(element).display !== 'none')
+        .map(element => ({
+          element, stack: element.closest('.globe-label-stack'),
+          leader: element.closest('.globe-label-stack').previousElementSibling,
+          rate: element.querySelector('.globe-flow-source-stat'),
+        }))
+      const state = { frames: 0, hiddenFrames: 0, replacedFrames: 0, frame: 0 }
+      const sample = () => {
+        state.frames++
+        if (tracked.some(({ element, stack, leader, rate }) => !element.isConnected
+          || element.parentElement !== stack || stack.previousElementSibling !== leader
+          || element.querySelector('.globe-flow-source-stat') !== rate))
+          state.replacedFrames++
+        if (tracked.some(({ element, stack }) => getComputedStyle(element).display === 'none'
+          || getComputedStyle(stack).display === 'none'))
+          state.hiddenFrames++
+        state.frame = requestAnimationFrame(sample)
+      }
+      state.frame = requestAnimationFrame(sample)
+      return state
+    })
+    // Keep the manual loading state observable even with software WebGL rendering.
+    collectionDelay = 2000
+    const refreshButton = page.getByRole('button', { name: 'Refresh Topology', exact: true })
+    const automaticResponse = page.waitForResponse(response =>
+      response.url().includes('/networks/info') && response.status() === 200)
+    await page.waitForRequest(request => request.url().includes('/networks/info'))
+    assert.equal(await refreshButton.locator('[data-pc-section="loadingicon"]').count(), 0,
+      `${name}: automatic polling activated the manual refresh spinner`)
+    await automaticResponse
+    await page.waitForTimeout(700)
+    const manualResponse = page.waitForResponse(response =>
+      response.url().includes('/networks/info') && response.status() === 200)
+    await Promise.all([
+      refreshButton.locator('[data-pc-section="loadingicon"]').waitFor(),
+      refreshButton.click(),
+    ])
+    await manualResponse
+    await page.waitForTimeout(700)
+    assert.equal(await refreshButton.locator('[data-pc-section="loadingicon"]').count(), 0,
+      `${name}: manual refresh spinner did not stop`)
+    const continuityResult = await continuity.evaluate(state => {
+      cancelAnimationFrame(state.frame)
+      return { frames: state.frames, hiddenFrames: state.hiddenFrames, replacedFrames: state.replacedFrames }
+    })
+    await continuity.dispose()
+    collectionDelay = 0
+    assert.ok(continuityResult.frames > 2, `${name}: label continuity was not sampled across rendered frames`)
+    assert.equal(continuityResult.replacedFrames, 0, `${name}: polling recreated traffic labels or their contents`)
+    assert.equal(continuityResult.hiddenFrames, 0, `${name}: polling briefly hid visible traffic labels`)
+    await assertLocalLabelLayout(page, name)
+    await page.screenshot({ path: join(output, `${name}-close.png`), fullPage: true })
+    if (name === 'desktop') {
+      await selectTheme(page, 'light')
+      await assertLightGlobeLabels(page)
+      await page.screenshot({ path: join(output, 'desktop-close-light.png'), fullPage: true })
+    }
+    const savedDistance = Number(await canvas.getAttribute('data-globe-distance'))
+    const savedAzimuth = Number(await canvas.getAttribute('data-globe-azimuth'))
+    await page.waitForTimeout(600)
+    await page.reload()
+    await page.locator('.globe-stage canvas').waitFor()
+    await page.locator('.node-row').first().waitFor()
+    await page.waitForTimeout(600)
+    assert.ok(Math.abs(Number(await canvas.getAttribute('data-globe-distance')) - savedDistance) < 0.02,
+      `${name}: zoom did not survive page reload`)
+    assert.ok(Math.abs(Number(await canvas.getAttribute('data-globe-azimuth')) - savedAzimuth) < 0.02,
+      `${name}: camera orientation did not survive page reload`)
+    assert.equal(await page.getByRole('button', { name: 'Auto Rotate', exact: true }).count(), 1,
+    `${name}: rotation switch did not survive page reload`)
+    assert.equal(await page.locator('.node-row').filter({ hasText: 'Auckland' }).getAttribute('aria-pressed'), 'true',
+      `${name}: selected node did not survive page reload`)
+    if (name === 'desktop') {
+      assert.equal(await page.evaluate(() => document.documentElement.classList.contains('app-dark')), false,
+        'Persisted light mode was ignored on reload')
+      assert.ok((await canvasBrightness(canvas)).sphere > 160,
+        'Persisted light mode did not initialize the globe materials')
+      await selectTheme(page, 'dark')
+      console.log('desktop: explicit/system theme changes, light globe and label contrast, preserved view and persisted light mode passed')
+    }
+    await page.getByRole('button', { name: 'Reset View', exact: true }).click()
+    await page.waitForFunction(longitude =>
+      Math.abs(Number(document.querySelector('.globe-stage canvas')?.getAttribute('data-globe-azimuth')) - longitude) < 1e-8,
+    defaultLongitude)
+    assert.ok(Math.abs(Number(await canvas.getAttribute('data-globe-azimuth')) - defaultLongitude) < 1e-8,
+      `${name}: reset view did not center on Hong Kong`)
+    await page.locator('.node-row').filter({ hasText: 'Auckland' }).click()
+    await page.reload()
+    await page.locator('.node-row').first().waitFor()
+    await page.locator('.globe-stage canvas').waitFor()
+    assert.equal(await page.locator('.node-row.selected').count(), 0,
+      `${name}: canceled selection returned after page reload`)
+    assert.equal(await page.locator('.node-detail').count(), 0)
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1)
+    assert.equal(overflow, false, `${name}: horizontal overflow`)
+    await page.screenshot({ path: join(output, `${name}.png`), fullPage: true })
+    console.log(`${name}: ${landPixels} continent pixels; Hong Kong view, selection toggle, silent polling, continuous RTT labels, rotation, zoom LOD and layout passed`)
+  }
+  jitter = true
+  await page.waitForTimeout(5000)
+  assert.equal(await page.locator('.node-row').count(), 4, 'Transient collection errors removed buffered nodes')
+  assert.equal(await page.locator('.dashboard-error').count(), 0,
+    'Short collection errors must not display an incomplete-data warning')
+  assert.ok(await page.locator('.node-row.stale').count() > 0, 'Buffered nodes must be marked stale')
+  jitter = false
+  await page.waitForTimeout(5000)
+  assert.equal(await page.locator('.node-row.stale').count(), 0, 'Recovered node data remained stale')
+  const recoveredRequest = page.waitForResponse(response =>
+    response.url().includes(`/machines/${uuidString(2)}/networks/info`) && response.status() === 200,
+  { timeout: 15_000 })
+  hangNext = true
+  await page.waitForTimeout(2500)
+  assert.ok(hungRoute, 'The hanging-request fixture did not run')
+  assert.equal(await page.locator('.node-row').count(), 4, 'An in-flight request removed buffered nodes')
+  await recoveredRequest
+  await page.waitForTimeout(300)
+  assert.equal(await page.locator('.node-row.stale').count(), 0, 'A timed-out request did not recover through retry')
+  await hungRoute.abort()
+  colocated = true
+  trafficScale = 0.1
+  await page.reload()
+  await page.locator('.node-row').first().waitFor()
+  await page.waitForTimeout(3500)
+  await page.locator('.node-row .node-name').filter({ hasText: 'Shanghai' }).click()
+  const overlappingCanvas = page.locator('.globe-stage canvas')
+  await overlappingCanvas.scrollIntoViewIfNeeded()
+  const overlappingBounds = await overlappingCanvas.boundingBox()
+  await page.mouse.move(overlappingBounds.x + overlappingBounds.width * 0.15,
+    overlappingBounds.y + overlappingBounds.height * 0.15)
+  await page.mouse.wheel(0, -2500)
+  await page.waitForFunction(() =>
+    document.querySelector('.globe-labels')?.getAttribute('data-traffic-labels-visible') === 'true')
+  await page.waitForFunction(() => [...document.querySelectorAll('.globe-traffic-label')]
+    .some(element => getComputedStyle(element).display !== 'none'))
+  assert.equal(await page.locator('.globe-stage canvas').getAttribute('data-globe-invalid-flows'), '0',
+    'Colocated nodes generated invalid connection flow coordinates')
+  const overlapping = JSON.parse(await page.locator('.globe-stage canvas').getAttribute('data-globe-flow-timings'))
+  assert.equal(overlapping.length, 12, 'Overlapping device paths merged independent directions')
+  assert.equal(new Set(overlapping.map(flow => flow.key)).size, 12, 'Distinct devices share an emitter key')
+  const forwardOverlapping = overlapping.filter(flow => JSON.parse(flow.key)[2] === false)
+  assert.ok(forwardOverlapping.every(flow => flow.emissionsPerSecond < 2),
+    'Two-megabit overlapping links became solid streams')
+  assert.ok(new Set(forwardOverlapping.map(flow => flow.travelSeconds)).size >= 3,
+    'Overlapping paths lost their individual RTT travel speeds')
+  const overlappingLabels = await assertLocalLabelLayout(page, 'overlapping mobile')
+  assert.ok(overlappingLabels.some(label => label.traffic),
+    'Crowded-link validation did not display any traffic labels')
+  assert.equal(await page.locator('.globe-node-stack:visible').count(), 1,
+    'Devices in the same city split into several scattered name groups')
+  const mobileNodes = await page.locator('.globe-node-stack .globe-node-label').count()
+  assert.ok(mobileNodes > 0 && mobileNodes <= 4, 'The city group must load complete individual device cards')
+  const routeStack = page.locator('.globe-traffic-stack:visible')
+  assert.equal(await routeStack.count(), 1, 'Overlapping geographic links split into separate label groups')
+  const mobileRoutes = await routeStack.locator('.globe-traffic-label').count()
+  assert.ok(mobileRoutes > 0 && mobileRoutes < 6,
+    'Crowded mobile routes should load only the individual measurements that fit')
+  await assertTrafficCardWheel(page, overlappingCanvas, 'overlapping mobile')
+  await assertLocalLabelLayout(page, 'overlapping mobile after card zoom')
+  await page.screenshot({ path: join(output, 'mobile-overlapping.png'), fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.waitForFunction(() => document.querySelector('.globe-stage canvas')?.clientWidth > 800)
+  await page.waitForTimeout(300)
+  await page.waitForFunction(previous => document.querySelectorAll('.globe-traffic-label').length > previous, mobileRoutes)
+  const desktopStacks = await assertLocalLabelLayout(page, 'overlapping desktop')
+  const expandedRoutes = desktopStacks.find(stack => stack.traffic)
+  assert.ok(expandedRoutes && expandedRoutes.rows.length > mobileRoutes && expandedRoutes.rows.length <= 6,
+    'A larger viewport did not load more complete route cards')
+  assert.equal(await page.locator('.globe-node-stack:visible').count(), 1)
+  const desktopRoutes = expandedRoutes.rows.length
+  await assertTrafficCardWheel(page, overlappingCanvas, 'overlapping desktop')
+  await page.screenshot({ path: join(output, 'desktop-overlapping.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 960 })
+  await page.waitForFunction(previous => document.querySelectorAll('.globe-traffic-label').length < previous, desktopRoutes)
+  await assertLocalLabelLayout(page, 'overlapping mobile after resize')
+  empty = true
+  await page.goto(dashboardUrl)
+  await page.reload()
+  await page.locator('.node-empty').waitFor()
+  assert.equal(await page.locator('.node-row').count(), 0)
+  assert.deepEqual(errors, [])
+  console.log(`Empty state and browser errors passed. Screenshots: ${output}`)
+} catch (error) {
+  const canvasState = await page?.locator('.globe-stage canvas').evaluate(element => ({
+    width: element.clientWidth, height: element.clientHeight,
+    distance: element.dataset.globeDistance, cloudLevel: element.dataset.globeCloudLevel,
+  })).catch(() => undefined)
+  console.error('Globe QA failed:', { url: page?.url(), errors, detailAssets, canvasState })
+  await page?.screenshot({ path: join(output, 'failure.png'), fullPage: true }).catch(() => {})
+  throw error
+} finally {
+  await browser.close()
+  previewServer?.kill()
+}

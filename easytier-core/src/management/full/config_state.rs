@@ -1,0 +1,388 @@
+//! Persistent enabled/disabled state for config-dir managed instances.
+//!
+//! EasyTier-core keeps authoritative network configs as `*.toml` files under
+//! its working (`--config-dir`) directory. This module records which of those
+//! configs were running and which were stopped when the process shut down, so
+//! the next startup can restore the exact run state.
+
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write as _,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use atomic_write_file::{AtomicWriteFile, OpenOptions};
+use serde::{Deserialize, Serialize};
+
+pub const STATE_FILE_NAME: &str = "easytier-state.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InstanceState {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StateFile {
+    version: u32,
+    instances: HashMap<String, InstanceState>,
+}
+
+enum LoadResult {
+    Loaded(StateFile),
+    /// No state file yet (fresh config dir): keep the default behavior.
+    Missing,
+    /// The file exists but cannot be read or parsed.
+    Corrupt(String),
+}
+
+fn load_state_file(path: &Path) -> LoadResult {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(state) => LoadResult::Loaded(state),
+            Err(error) => LoadResult::Corrupt(format!("parse error: {error}")),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LoadResult::Missing,
+        Err(error) => LoadResult::Corrupt(format!("read error: {error}")),
+    }
+}
+
+fn write_state_file(path: &Path, state: &StateFile) -> anyhow::Result<()> {
+    let contents = serde_json::to_vec_pretty(state)?;
+    #[cfg(unix)]
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        atomic_write_file::unix::OpenOptionsExt::preserve_mode(&mut options, false);
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    }
+    #[cfg(not(unix))]
+    let options = OpenOptions::new();
+    let mut file: AtomicWriteFile = options.open(path)?;
+    file.write_all(&contents)?;
+    file.commit()?;
+    Ok(())
+}
+
+/// Thread-safe store of per-instance enabled/disabled state persisted as a
+/// JSON file inside the config directory. Without a config dir the store is a
+/// pure in-memory no-op (state transitions still succeed).
+#[derive(Debug)]
+pub struct InstanceStateStore {
+    path: Option<PathBuf>,
+    inner: Mutex<StateFile>,
+    /// Set when the state file exists but could not be read or parsed.
+    /// Unknown instances then fail safe to "disabled" instead of surprising
+    /// the user by starting every network they had stopped. Cleared again
+    /// once a fresh state has been persisted successfully.
+    corrupt_on_load: AtomicBool,
+}
+
+impl InstanceStateStore {
+    pub fn new(config_dir: Option<&Path>) -> Self {
+        let path = config_dir.map(|dir| dir.join(STATE_FILE_NAME));
+        let (inner, corrupt_reason) = match path.as_deref().map(load_state_file) {
+            Some(LoadResult::Loaded(state)) => (state, None),
+            Some(LoadResult::Missing) | None => (StateFile::default(), None),
+            Some(LoadResult::Corrupt(reason)) => (StateFile::default(), Some(reason)),
+        };
+        let corrupt_on_load = corrupt_reason.is_some();
+        if let Some(reason) = corrupt_reason {
+            tracing::warn!(
+                ?path,
+                reason,
+                "instance state file is unreadable; treating it as empty, unknown instances stay disabled until state is rewritten"
+            );
+        }
+        Self {
+            path,
+            inner: Mutex::new(inner),
+            corrupt_on_load: AtomicBool::new(corrupt_on_load),
+        }
+    }
+
+    /// Convenience constructor for an in-memory no-op store (no config dir).
+    /// Used by hosts that never persist instance state (FFI, ohrs, mini, GUI,
+    /// tests). Equivalent to `InstanceStateStore::new(None)`.
+    pub fn in_memory() -> Self {
+        Self::new(None)
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Whether the instance should run at startup. Unknown instances default
+    /// to enabled so that pre-existing config files keep their official
+    /// "scan and start everything" behavior - unless the state file existed
+    /// but could not be read: then fail safe to disabled so a corrupt file
+    /// cannot resurrect every network the user had stopped.
+    pub fn is_enabled(&self, instance_id: &uuid::Uuid) -> bool {
+        let default_enabled = !self.corrupt_on_load.load(Ordering::Relaxed);
+        self.enabled_state(instance_id).unwrap_or(default_enabled)
+    }
+
+    pub fn enabled_state(&self, instance_id: &uuid::Uuid) -> Option<bool> {
+        self.inner
+            .lock()
+            .unwrap()
+            .instances
+            .get(&instance_id.to_string())
+            .map(|state| state.enabled)
+    }
+
+    pub fn set_enabled(&self, instance_id: uuid::Uuid, enabled: bool) -> anyhow::Result<()> {
+        self.set_enabled_batch(&[instance_id], enabled)
+    }
+
+    pub fn set_enabled_batch(
+        &self,
+        instance_ids: &[uuid::Uuid],
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        if instance_ids.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.inner.lock().unwrap();
+        let mut next = state.clone();
+        for instance_id in instance_ids {
+            next.instances
+                .insert(instance_id.to_string(), InstanceState { enabled });
+        }
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
+    }
+
+    pub fn remove(&self, instance_id: &uuid::Uuid) -> anyhow::Result<()> {
+        let mut state = self.inner.lock().unwrap();
+        if !state.instances.contains_key(&instance_id.to_string()) {
+            return Ok(());
+        }
+        let mut next = state.clone();
+        next.instances.remove(&instance_id.to_string());
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
+    }
+
+    /// Record the default run state of newly discovered configs and remove
+    /// disappeared identities in one atomic write. An incomplete scan can
+    /// discover configs, but must retain identities it cannot rule out.
+    pub fn reconcile_configs(
+        &self,
+        known_ids: &HashSet<uuid::Uuid>,
+        remove_missing: bool,
+    ) -> anyhow::Result<()> {
+        let mut state = self.inner.lock().unwrap();
+        let mut next = state.clone();
+        if remove_missing {
+            next.instances
+                .retain(|id, _| id.parse().is_ok_and(|id| known_ids.contains(&id)));
+        }
+        // Capture this once: persisting the first new config must not change
+        // the fail-safe default of its siblings after a corrupt state load.
+        let enabled = !self.corrupt_on_load.load(Ordering::Relaxed);
+        for id in known_ids {
+            next.instances
+                .entry(id.to_string())
+                .or_insert(InstanceState { enabled });
+        }
+        if next.instances != state.instances {
+            self.persist(&next)?;
+            *state = next;
+        }
+        Ok(())
+    }
+
+    /// All instance ids recorded as disabled (stopped) in the store.
+    pub fn disabled_instance_ids(&self) -> Vec<uuid::Uuid> {
+        self.inner
+            .lock()
+            .unwrap()
+            .instances
+            .iter()
+            .filter(|(_, state)| !state.enabled)
+            .filter_map(|(id, _)| uuid::Uuid::parse_str(id).ok())
+            .collect()
+    }
+
+    fn persist(&self, state: &StateFile) -> anyhow::Result<()> {
+        if let Some(path) = self.path.as_deref() {
+            write_state_file(path, state)?;
+            self.corrupt_on_load.store(false, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("easytier-state-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn unknown_instances_default_to_enabled() {
+        let store = InstanceStateStore::new(None);
+        assert!(store.is_enabled(&uuid::Uuid::new_v4()));
+        assert!(store.disabled_instance_ids().is_empty());
+    }
+
+    #[test]
+    fn state_persists_across_store_recreation() {
+        let dir = temp_dir();
+        let instance_id = uuid::Uuid::new_v4();
+        {
+            let store = InstanceStateStore::new(Some(&dir));
+            store.set_enabled(instance_id, false).unwrap();
+            assert!(!store.is_enabled(&instance_id));
+        }
+        let store = InstanceStateStore::new(Some(&dir));
+        assert!(!store.is_enabled(&instance_id));
+        assert_eq!(store.disabled_instance_ids(), vec![instance_id]);
+        assert!(dir.join(STATE_FILE_NAME).is_file());
+    }
+
+    #[test]
+    fn remove_clears_state_and_then_defaults_to_enabled() {
+        let dir = temp_dir();
+        let instance_id = uuid::Uuid::new_v4();
+        let store = InstanceStateStore::new(Some(&dir));
+        store.set_enabled(instance_id, false).unwrap();
+        assert!(!store.is_enabled(&instance_id));
+        store.remove(&instance_id).unwrap();
+        assert!(store.is_enabled(&instance_id));
+        assert!(store.disabled_instance_ids().is_empty());
+    }
+
+    #[test]
+    fn memory_only_store_still_tracks_state() {
+        let instance_id = uuid::Uuid::new_v4();
+        let store = InstanceStateStore::new(None);
+        store.set_enabled(instance_id, false).unwrap();
+        assert!(!store.is_enabled(&instance_id));
+        store.set_enabled(instance_id, true).unwrap();
+        assert!(store.is_enabled(&instance_id));
+    }
+
+    #[test]
+    fn missing_state_file_keeps_default_enabled() {
+        let dir = temp_dir();
+        // No state file at all: fresh config dir, official scan-and-start.
+        let store = InstanceStateStore::new(Some(&dir));
+        assert!(store.is_enabled(&uuid::Uuid::new_v4()));
+    }
+
+    #[test]
+    fn reconciliation_records_defaults_preserves_pauses_and_removes_all_missing_states() {
+        let dir = temp_dir();
+        let store = InstanceStateStore::new(Some(&dir));
+        let new = uuid::Uuid::new_v4();
+        let paused = uuid::Uuid::new_v4();
+        let removed_enabled = uuid::Uuid::new_v4();
+        let removed_disabled = uuid::Uuid::new_v4();
+        store.set_enabled(paused, false).unwrap();
+        store.set_enabled(removed_enabled, true).unwrap();
+        store.set_enabled(removed_disabled, false).unwrap();
+
+        let known = HashSet::from([new, paused]);
+        store.reconcile_configs(&known, true).unwrap();
+        let reloaded = InstanceStateStore::new(Some(&dir));
+        assert_eq!(reloaded.enabled_state(&new), Some(true));
+        assert_eq!(reloaded.enabled_state(&paused), Some(false));
+        assert_eq!(reloaded.enabled_state(&removed_enabled), None);
+        assert_eq!(reloaded.enabled_state(&removed_disabled), None);
+
+        // An unchanged scan must not attempt any write, even when the state
+        // path is temporarily unwritable.
+        std::fs::remove_file(dir.join(STATE_FILE_NAME)).unwrap();
+        std::fs::create_dir(dir.join(STATE_FILE_NAME)).unwrap();
+        store.reconcile_configs(&known, true).unwrap();
+    }
+
+    #[test]
+    fn incomplete_scan_records_discoveries_without_removing_unknown_state() {
+        let dir = temp_dir();
+        let store = InstanceStateStore::new(Some(&dir));
+        let new = uuid::Uuid::new_v4();
+        let unknown = uuid::Uuid::new_v4();
+        store.set_enabled(unknown, false).unwrap();
+        store
+            .reconcile_configs(&HashSet::from([new]), false)
+            .unwrap();
+        let reloaded = InstanceStateStore::new(Some(&dir));
+        assert_eq!(reloaded.enabled_state(&new), Some(true));
+        assert_eq!(reloaded.enabled_state(&unknown), Some(false));
+    }
+
+    #[test]
+    fn reconciliation_keeps_all_unknown_configs_paused_after_a_corrupt_load() {
+        let dir = temp_dir();
+        std::fs::write(dir.join(STATE_FILE_NAME), "not json").unwrap();
+        let store = InstanceStateStore::new(Some(&dir));
+        let known = HashSet::from([uuid::Uuid::new_v4(), uuid::Uuid::new_v4()]);
+        store.reconcile_configs(&known, true).unwrap();
+        let reloaded = InstanceStateStore::new(Some(&dir));
+        for id in known {
+            assert_eq!(reloaded.enabled_state(&id), Some(false));
+        }
+    }
+
+    #[test]
+    fn failed_reconciliation_preserves_the_previous_state() {
+        let dir = temp_dir();
+        let store = InstanceStateStore::new(Some(&dir));
+        let old = uuid::Uuid::new_v4();
+        let new = uuid::Uuid::new_v4();
+        store.set_enabled(old, false).unwrap();
+        std::fs::remove_file(dir.join(STATE_FILE_NAME)).unwrap();
+        std::fs::create_dir(dir.join(STATE_FILE_NAME)).unwrap();
+        assert!(
+            store
+                .reconcile_configs(&HashSet::from([new]), true)
+                .is_err()
+        );
+        assert_eq!(store.enabled_state(&old), Some(false));
+        assert_eq!(store.enabled_state(&new), None);
+    }
+
+    #[test]
+    fn corrupt_state_file_fails_safe_to_disabled() {
+        let dir = temp_dir();
+        std::fs::write(dir.join(STATE_FILE_NAME), "not json").unwrap();
+        let store = InstanceStateStore::new(Some(&dir));
+        // The file exists but is unreadable: starting every unknown instance
+        // would resurrect networks the user had stopped.
+        assert!(!store.is_enabled(&uuid::Uuid::new_v4()));
+        // Recovery: once fresh state is persisted the default is restored.
+        let id = uuid::Uuid::new_v4();
+        store.set_enabled(id, true).unwrap();
+        assert!(store.is_enabled(&uuid::Uuid::new_v4()));
+    }
+
+    #[test]
+    fn failed_persistence_does_not_change_in_memory_state() {
+        let dir = temp_dir();
+        let id = uuid::Uuid::new_v4();
+        let store = InstanceStateStore::new(Some(&dir));
+        std::fs::create_dir(dir.join(STATE_FILE_NAME)).unwrap();
+        assert!(store.set_enabled(id, false).is_err());
+        // The in-memory map is unchanged: the id was never recorded.
+        assert_eq!(store.enabled_state(&id), None);
+        std::fs::remove_dir(dir.join(STATE_FILE_NAME)).unwrap();
+        store.set_enabled(id, false).unwrap();
+        std::fs::remove_file(dir.join(STATE_FILE_NAME)).unwrap();
+        std::fs::create_dir(dir.join(STATE_FILE_NAME)).unwrap();
+        assert!(store.remove(&id).is_err());
+        assert!(!store.is_enabled(&id));
+    }
+}

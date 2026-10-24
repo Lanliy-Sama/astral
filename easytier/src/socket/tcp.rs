@@ -1,0 +1,559 @@
+use std::{
+    io,
+    net::{IpAddr, SocketAddr},
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{Context, Poll},
+    time::Duration,
+};
+
+use easytier_core::{
+    foundation::bandwidth::TransmissionWindowSource,
+    socket::tcp::{
+        TcpBindOptions, TcpConnectOptions, TcpListenOptions, TcpListenPurpose, TcpSocketPurpose,
+        VirtualTcpListener, VirtualTcpSocket, VirtualTcpSplit,
+    },
+    tunnel::TunnelError,
+};
+mod listener;
+mod window;
+use socket2::{SockRef, TcpKeepalive};
+#[cfg(test)]
+use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::{TcpSocket, TcpStream},
+};
+use window::{TcpWindowIo, TcpWindowSampler, TcpWindowSource};
+
+use crate::{
+    common::netns::NetNS,
+    socket_protector::{ProtectedSocket, protect_native_socket},
+    tunnel::common::{BindDev, apply_socket_mark, bind},
+};
+
+enum RuntimeTcpSocketInner {
+    Tcp(ProtectedSocket<TcpStream>),
+    #[cfg(unix)]
+    Unix(UnixStream),
+    #[cfg(feature = "faketcp")]
+    FakeTcp(crate::socket::fake_tcp::FakeTcpSocket),
+}
+
+pub struct RuntimeTcpSocket {
+    inner: RuntimeTcpSocketInner,
+    window_sampler: OnceLock<Arc<TcpWindowSampler>>,
+}
+
+impl RuntimeTcpSocket {
+    #[cfg(test)]
+    pub(crate) fn new(stream: TcpStream) -> Self {
+        Self::from_protected(ProtectedSocket::new(stream, None))
+    }
+
+    pub(crate) fn from_protected(stream: ProtectedSocket<TcpStream>) -> Self {
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!(?error, "set_nodelay failed for tcp stream");
+        }
+        Self {
+            inner: RuntimeTcpSocketInner::Tcp(stream),
+            window_sampler: OnceLock::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn from_unix(stream: UnixStream) -> Self {
+        Self {
+            inner: RuntimeTcpSocketInner::Unix(stream),
+            window_sampler: OnceLock::new(),
+        }
+    }
+
+    #[cfg(feature = "faketcp")]
+    pub(crate) fn from_fake_tcp(socket: crate::socket::fake_tcp::FakeTcpSocket) -> Self {
+        Self {
+            inner: RuntimeTcpSocketInner::FakeTcp(socket),
+            window_sampler: OnceLock::new(),
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn url_from_unix_socket_addr(addr: tokio::net::unix::SocketAddr) -> Option<url::Url> {
+    addr.as_pathname()
+        .and_then(|path| path.to_str())
+        .and_then(|path| format!("unix://{path}").parse().ok())
+}
+
+impl AsyncRead for RuntimeTcpSocket {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        match &mut this.inner {
+            RuntimeTcpSocketInner::Tcp(stream) => {
+                if let Some(sampler) = this.window_sampler.get() {
+                    sampler.sample(stream);
+                }
+                Pin::new(stream).poll_read(cx, buf)
+            }
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(socket) => Pin::new(socket).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for RuntimeTcpSocket {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.as_mut().get_mut();
+        match &mut this.inner {
+            RuntimeTcpSocketInner::Tcp(stream) => {
+                if let Some(sampler) = this.window_sampler.get() {
+                    sampler.sample(stream);
+                }
+                Pin::new(stream).poll_write(cx, buf)
+            }
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(socket) => Pin::new(socket).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut self.inner {
+            RuntimeTcpSocketInner::Tcp(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(socket) => Pin::new(socket).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        let result = match &mut this.inner {
+            RuntimeTcpSocketInner::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(socket) => Pin::new(socket).poll_shutdown(cx),
+        };
+        if matches!(result, Poll::Ready(Ok(())))
+            && let Some(sampler) = this.window_sampler.get()
+        {
+            sampler.stop();
+        }
+        result
+    }
+}
+
+impl VirtualTcpSocket for RuntimeTcpSocket {
+    fn into_split(self) -> VirtualTcpSplit {
+        let window_sampler = self.window_sampler.into_inner();
+        match self.inner {
+            RuntimeTcpSocketInner::Tcp(stream) => {
+                let (stream, registration) = stream.parts();
+                let (reader, writer) = stream.into_split();
+                let reader = ProtectedSocket::new(reader, registration.clone());
+                let writer = ProtectedSocket::new(writer, registration);
+                if let Some(sampler) = window_sampler {
+                    (
+                        Box::new(TcpWindowIo::new(reader, sampler.clone())),
+                        Box::new(TcpWindowIo::new(writer, sampler)),
+                    )
+                } else {
+                    (Box::new(reader), Box::new(writer))
+                }
+            }
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(stream) => {
+                let (reader, writer) = stream.into_split();
+                (Box::new(reader), Box::new(writer))
+            }
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(socket) => {
+                let (reader, writer) = tokio::io::split(socket);
+                (Box::new(reader), Box::new(writer))
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        match &self.inner {
+            RuntimeTcpSocketInner::Tcp(stream) => stream.local_addr(),
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Unix stream has no IP local address",
+            )),
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(socket) => socket.local_addr(),
+        }
+    }
+
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        match &self.inner {
+            RuntimeTcpSocketInner::Tcp(stream) => stream.peer_addr(),
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Unix stream has no IP peer address",
+            )),
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(socket) => socket.peer_addr(),
+        }
+    }
+
+    fn transport_label(&self) -> Option<&str> {
+        match &self.inner {
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(socket) => socket.transport_label(),
+            RuntimeTcpSocketInner::Tcp(_) => None,
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(_) => None,
+        }
+    }
+
+    fn bandwidth_source(&self) -> Option<Arc<dyn TransmissionWindowSource>> {
+        let stream = match &self.inner {
+            RuntimeTcpSocketInner::Tcp(stream) => stream,
+            #[cfg(unix)]
+            RuntimeTcpSocketInner::Unix(_) => return None,
+            #[cfg(feature = "faketcp")]
+            RuntimeTcpSocketInner::FakeTcp(_) => return None,
+        };
+        let sampler = self
+            .window_sampler
+            .get_or_init(|| Arc::new(TcpWindowSampler::new()));
+        sampler.sample(stream);
+        Some(Arc::new(TcpWindowSource(Arc::downgrade(sampler))))
+    }
+}
+
+#[derive(Debug)]
+pub struct RuntimeTcpListener {
+    listener: listener::NativeTcpListener,
+    purpose: TcpListenPurpose,
+    need_protect: bool,
+}
+
+#[async_trait::async_trait]
+impl VirtualTcpListener for RuntimeTcpListener {
+    type Socket = RuntimeTcpSocket;
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    async fn accept(&self) -> io::Result<(Self::Socket, SocketAddr)> {
+        let (stream, addr) = self.listener.accept().await?;
+        let registration =
+            protect_native_socket(&SockRef::from(&stream), self.need_protect).await?;
+        if self.purpose == TcpListenPurpose::ProxyNat {
+            prepare_proxy_tcp_socket(&stream)?;
+        }
+        Ok((
+            RuntimeTcpSocket::from_protected(ProtectedSocket::new(stream, registration)),
+            addr,
+        ))
+    }
+}
+
+fn unspecified_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
+    match remote_addr {
+        SocketAddr::V4(_) => SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 0),
+        SocketAddr::V6(_) => SocketAddr::new(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 0]), 0),
+    }
+}
+
+fn bind_dev_from_options(options: &TcpBindOptions, local_addr_was_defaulted: bool) -> BindDev {
+    options
+        .bind_device
+        .clone()
+        .map(BindDev::from)
+        .unwrap_or_else(|| {
+            if local_addr_was_defaulted {
+                BindDev::Disabled
+            } else {
+                BindDev::Auto
+            }
+        })
+}
+
+async fn bind_tcp_socket(
+    remote_addr: SocketAddr,
+    bind_options: &TcpBindOptions,
+) -> Result<ProtectedSocket<TcpSocket>, TunnelError> {
+    let (bind_addr, local_addr_was_defaulted) = match bind_options.local_addr {
+        Some(addr) => (addr, false),
+        None => (unspecified_bind_addr(remote_addr), true),
+    };
+    let bind_dev = bind_dev_from_options(bind_options, local_addr_was_defaulted);
+
+    bind::<TcpSocket>()
+        .addr(bind_addr)
+        .dev(bind_dev)
+        .net_ns(NetNS::from_socket_context(&bind_options.context))
+        .only_v6(bind_options.only_v6)
+        .reuse_addr(native_reuse_addr(bind_options))
+        .reuse_port(bind_options.reuse_port)
+        .maybe_socket_mark(bind_options.context.socket_mark)
+        .need_protect(bind_options.need_protect)
+        .call()
+        .await
+}
+
+pub(crate) async fn create_tcp_socket(
+    remote_addr: SocketAddr,
+    bind_options: &TcpBindOptions,
+) -> Result<ProtectedSocket<TcpSocket>, TunnelError> {
+    if must_bind_before_connect(bind_options) {
+        return bind_tcp_socket(remote_addr, bind_options).await;
+    }
+    // A network namespace is a thread property, but the socket retains its
+    // namespace after creation. Never keep the guard across connect().await.
+    let socket =
+        NetNS::from_socket_context(&bind_options.context).run(|| -> Result<_, TunnelError> {
+            let socket = if remote_addr.is_ipv4() {
+                TcpSocket::new_v4()?
+            } else {
+                let socket = TcpSocket::new_v6()?;
+                // Windows defaults IPv6 sockets to v6-only; the unbound path
+                // must honor the same dual-stack option as the bind path.
+                SockRef::from(&socket).set_only_v6(bind_options.only_v6)?;
+                socket
+            };
+            apply_socket_mark(
+                &socket2::SockRef::from(&socket),
+                bind_options.context.socket_mark,
+            )?;
+            Ok(socket)
+        })?;
+    let registration =
+        protect_native_socket(&SockRef::from(&socket), bind_options.need_protect).await?;
+    Ok(ProtectedSocket::new(socket, registration))
+}
+
+fn must_bind_before_connect(bind_options: &TcpBindOptions) -> bool {
+    bind_options.local_addr.is_some()
+        || bind_options.bind_device.is_some()
+        || bind_options.reuse_port
+        || bind_options.only_v6
+        || bind_options
+            .reuse_addr
+            .is_some_and(|reuse_addr| reuse_addr != native_reuse_addr_default())
+}
+
+fn native_reuse_addr_default() -> bool {
+    !cfg!(target_os = "windows")
+}
+
+fn native_reuse_addr(bind_options: &TcpBindOptions) -> bool {
+    bind_options
+        .reuse_addr
+        .unwrap_or_else(native_reuse_addr_default)
+}
+
+pub(crate) async fn bind_tcp_listener(
+    options: TcpListenOptions,
+) -> Result<RuntimeTcpListener, TunnelError> {
+    let purpose = options.purpose;
+    let mut bind_options = options.bind;
+    let addr = bind_options.local_addr.ok_or_else(|| {
+        TunnelError::InvalidAddr("tcp listener requires a local bind address".to_owned())
+    })?;
+    if bind_options.bind_device.is_none() && purpose == TcpListenPurpose::PortLease {
+        bind_options.bind_device = Some(String::new());
+    }
+    let listener = listener::NativeTcpListener::bind(addr, &bind_options).await?;
+    Ok(RuntimeTcpListener {
+        listener,
+        purpose,
+        need_protect: bind_options.need_protect,
+    })
+}
+
+pub(crate) async fn connect_tcp(
+    options: TcpConnectOptions,
+) -> Result<RuntimeTcpSocket, TunnelError> {
+    let remote_addr = options.remote_addr;
+    let purpose = options.purpose;
+    let bind_options = options.bind;
+
+    let socket = create_tcp_socket(remote_addr, &bind_options).await?;
+    limit_hole_punch_syn_retransmits(&socket, purpose)?;
+    let stream = socket.connect(remote_addr).await?;
+    prepare_connected_tcp_socket(&stream, purpose)?;
+    Ok(RuntimeTcpSocket::from_protected(stream))
+}
+
+/// Failed hole-punch dials must not pin the punch window: a blackholed SYN
+/// retransmits for minutes at the OS default, while the hole-punch engine
+/// runs its own bounded retry loops. Restricts TCP_SYNCNT to hole punching
+/// so all other connect purposes keep default behavior.
+fn limit_hole_punch_syn_retransmits(
+    socket: &TcpSocket,
+    purpose: TcpSocketPurpose,
+) -> io::Result<()> {
+    if purpose != TcpSocketPurpose::HolePunch {
+        return Ok(());
+    }
+    set_single_syn_retransmit(socket)
+}
+
+// socket2 has no TCP_SYNCNT wrapper; fall back to a raw setsockopt on the
+// kernels that provide it. Windows' shorter default retransmits are fine.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn set_single_syn_retransmit(socket: &TcpSocket) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let syn_count: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            socket2::SockRef::from(socket).as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_SYNCNT,
+            &syn_count as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn set_single_syn_retransmit(_socket: &TcpSocket) -> io::Result<()> {
+    Ok(())
+}
+
+fn prepare_connected_tcp_socket(stream: &TcpStream, purpose: TcpSocketPurpose) -> io::Result<()> {
+    match purpose {
+        TcpSocketPurpose::ProxyNat => prepare_proxy_tcp_socket(stream),
+        TcpSocketPurpose::StunProbe => SockRef::from(stream).set_linger(Some(Duration::ZERO)),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn prepare_proxy_tcp_socket(stream: &TcpStream) -> io::Result<()> {
+    const TCP_KEEPALIVE_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+    const TCP_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    #[cfg(not(target_os = "windows"))]
+    const TCP_KEEPALIVE_RETRIES: u32 = 2;
+
+    let keepalive = TcpKeepalive::new()
+        .with_time(TCP_KEEPALIVE_TIME)
+        .with_interval(TCP_KEEPALIVE_INTERVAL);
+
+    #[cfg(not(target_os = "windows"))]
+    let keepalive = keepalive.with_retries(TCP_KEEPALIVE_RETRIES);
+
+    let socket = SockRef::from(stream);
+    socket.set_tcp_keepalive(&keepalive)?;
+    if let Err(error) = socket.set_tcp_nodelay(true) {
+        tracing::warn!(?error, "set_nodelay failed, ignore it");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    #[tokio::test]
+    async fn protected_tcp_owned_split_retains_registration_until_both_halves_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = create_tcp_socket(address, &TcpBindOptions::default())
+            .await
+            .unwrap()
+            .connect(address)
+            .await
+            .unwrap();
+        let (_server, _) = listener.accept().await.unwrap();
+        let (stream, registration) = client.parts();
+        let registration = registration.expect("native socket must carry protection lifetime");
+        let weak = Arc::downgrade(&registration);
+        let (reader, mut writer) =
+            RuntimeTcpSocket::from_protected(ProtectedSocket::new(stream, Some(registration)))
+                .into_split();
+        drop(reader);
+        assert!(
+            weak.upgrade().is_some(),
+            "writer must still own registration"
+        );
+        writer.shutdown().await.unwrap();
+        drop(writer);
+        assert!(
+            weak.upgrade().is_none(),
+            "closed halves must release registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_tcp_owned_split_preserves_full_duplex_and_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let client = client.unwrap();
+        let (mut server, _) = accepted.unwrap();
+        let (mut reader, mut writer) = RuntimeTcpSocket::new(client).into_split();
+
+        writer.write_all(b"client-to-server").await.unwrap();
+        let mut from_client = [0; 16];
+        server.read_exact(&mut from_client).await.unwrap();
+        assert_eq!(&from_client, b"client-to-server");
+
+        server.write_all(b"server-to-client").await.unwrap();
+        let mut from_server = [0; 16];
+        reader.read_exact(&mut from_server).await.unwrap();
+        assert_eq!(&from_server, b"server-to-client");
+
+        writer.shutdown().await.unwrap();
+        let mut after_shutdown = [0; 1];
+        assert_eq!(server.read(&mut after_shutdown).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn tcp_connect_binds_when_socket_option_requires_pre_connect_setup() {
+        assert!(must_bind_before_connect(
+            &TcpBindOptions::default().with_local_addr(Some("127.0.0.1:0".parse().unwrap()))
+        ));
+        assert!(must_bind_before_connect(
+            &TcpBindOptions::default().with_reuse_port(true)
+        ));
+        assert!(must_bind_before_connect(
+            &TcpBindOptions::default().with_only_v6(true)
+        ));
+        assert!(must_bind_before_connect(
+            &TcpBindOptions::default().with_bind_device(Some("eth0".to_owned()))
+        ));
+        assert!(!must_bind_before_connect(&TcpBindOptions::default()));
+        assert!(!must_bind_before_connect(
+            &TcpBindOptions::default().with_reuse_addr(native_reuse_addr_default())
+        ));
+        assert!(must_bind_before_connect(
+            &TcpBindOptions::default().with_reuse_addr(!native_reuse_addr_default())
+        ));
+        assert_eq!(
+            native_reuse_addr(&TcpBindOptions::default()),
+            native_reuse_addr_default()
+        );
+    }
+}

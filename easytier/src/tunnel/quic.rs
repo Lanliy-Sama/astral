@@ -1,0 +1,651 @@
+//! This example demonstrates how to make a QUIC connection that ignores the server certificate.
+//!
+//! Checkout the `README.md` for guidance.
+
+use crate::proto::common::TunnelInfo;
+use anyhow::Context;
+use easytier_core::{
+    connectivity::{
+        protocol::{ServerProtocolAdmission, ServerTunnelAcceptor},
+        transport::ConnectedUdpSession,
+    },
+    socket::udp::UdpSession,
+    tunnel::{
+        Tunnel, TunnelError,
+        framed::{FramedReader, FramedWriter},
+        wrapper::TunnelWrapper,
+    },
+};
+use quinn::{
+    AsyncUdpSocket, ClientConfig, Connection, ConnectionError, Endpoint, EndpointConfig,
+    ServerConfig, TransportConfig, congestion::BbrConfig,
+};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+pub(crate) mod session_common;
+mod session_socket;
+#[cfg(test)]
+pub(crate) mod session_tests;
+pub(crate) use session_common::{ConnWrapper, window_source};
+pub(crate) use session_socket::QuicUdpSessionSocket;
+
+// region config
+mod crypto {
+    use crate::tunnel::quic::QUIC_VERSION_ETQ1;
+    use crate::utils::BoxExt;
+    use bytes::{Buf, BytesMut};
+    use quinn_proto::crypto::{
+        ClientConfig, ExportKeyingMaterialError, KeyPair, Keys, ServerConfig, Session,
+        UnsupportedVersion,
+    };
+    use quinn_proto::transport_parameters::TransportParameters;
+    use quinn_proto::{
+        ConnectError, ConnectionId, Side, TransportError,
+        crypto::{CryptoError, HeaderKey, PacketKey},
+    };
+    use seahash::SeaHasher;
+    use std::any::Any;
+    use std::{hash::Hasher, sync::Arc};
+    use tracing::{error, instrument, trace};
+
+    #[derive(Debug, Clone, Copy)]
+    struct CryptoKey {
+        /// Bind the packet checksum to the packet number so that a truncated
+        /// packet number decoded out of window (RFC 9000 Appendix A) fails
+        /// authentication instead of acknowledging an unsent packet number.
+        pn_bound: bool,
+    }
+
+    impl CryptoKey {
+        fn for_version(version: u32) -> Self {
+            Self {
+                pn_bound: version == QUIC_VERSION_ETQ1,
+            }
+        }
+
+        fn header(self) -> KeyPair<Box<dyn HeaderKey>> {
+            KeyPair {
+                local: Box::new(self),
+                remote: Box::new(self),
+            }
+        }
+
+        fn packet(self) -> KeyPair<Box<dyn PacketKey>> {
+            KeyPair {
+                local: Box::new(self),
+                remote: Box::new(self),
+            }
+        }
+
+        fn keys(self) -> Keys {
+            Keys {
+                header: self.header(),
+                packet: self.packet(),
+            }
+        }
+    }
+
+    impl HeaderKey for CryptoKey {
+        fn decrypt(&self, _: usize, _: &mut [u8]) {}
+        fn encrypt(&self, _: usize, _: &mut [u8]) {}
+        fn sample_size(&self) -> usize {
+            0
+        }
+    }
+
+    impl CryptoKey {
+        fn checksum(slices: &[&[u8]]) -> u64 {
+            let mut hasher = SeaHasher::default();
+            for slice in slices {
+                hasher.write(&(slice.len() as u64).to_le_bytes());
+                hasher.write(slice);
+            }
+            hasher.finish()
+        }
+
+        // The packet number is mixed into the checksum before the slices. Real
+        // QUIC derives the AEAD nonce from the packet number, so a number
+        // decoded differently from how it was encoded fails authentication;
+        // this mirrors that property for the SeaHash integrity check.
+        fn checksum_with_packet(packet: u64, slices: &[&[u8]]) -> u64 {
+            let mut hasher = SeaHasher::default();
+            hasher.write(&packet.to_le_bytes());
+            for slice in slices {
+                hasher.write(&(slice.len() as u64).to_le_bytes());
+                hasher.write(slice);
+            }
+            hasher.finish()
+        }
+
+        fn checksum_for(&self, packet: u64, slices: &[&[u8]]) -> u64 {
+            if self.pn_bound {
+                Self::checksum_with_packet(packet, slices)
+            } else {
+                Self::checksum(slices)
+            }
+        }
+    }
+
+    impl PacketKey for CryptoKey {
+        #[instrument(level = "trace")]
+        fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize) {
+            let (header, rest) = buf.split_at_mut(header_len);
+            let (payload, tag) = rest.split_at_mut(rest.len() - self.tag_len());
+            let checksum = self.checksum_for(packet, &[header, payload]);
+            tag.copy_from_slice(&checksum.to_be_bytes());
+            trace!(checksum, ?header, ?payload, ?tag);
+        }
+
+        #[instrument(level = "trace")]
+        fn decrypt(
+            &self,
+            packet: u64,
+            header: &[u8],
+            payload: &mut BytesMut,
+        ) -> Result<(), CryptoError> {
+            let tag = payload.split_off(payload.len() - self.tag_len()).get_u64();
+            trace!(tag, ?payload);
+            let checksum = self.checksum_for(packet, &[header, payload]);
+            if checksum != tag {
+                error!(tag, checksum, "checksum mismatch");
+                return Err(CryptoError);
+            }
+            Ok(())
+        }
+
+        fn tag_len(&self) -> usize {
+            8
+        }
+
+        fn confidentiality_limit(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn integrity_limit(&self) -> u64 {
+            1 << 36
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HandshakeState {
+        EmitInitial,
+        EmitHandshake,
+        Done,
+    }
+
+    #[derive(Debug)]
+    struct QuicSession {
+        side: Side,
+        key: CryptoKey,
+        state: HandshakeState,
+        local: TransportParameters,
+        remote: Option<TransportParameters>,
+    }
+
+    impl QuicSession {
+        fn new(side: Side, version: u32, params: TransportParameters) -> Self {
+            Self {
+                side,
+                key: CryptoKey::for_version(version),
+                state: HandshakeState::EmitInitial,
+                local: params,
+                remote: None,
+            }
+        }
+    }
+
+    impl Session for QuicSession {
+        fn initial_keys(&self, _: &ConnectionId, _: Side) -> Keys {
+            self.key.keys()
+        }
+
+        fn handshake_data(&self) -> Option<Box<dyn Any>> {
+            self.remote.map(|params| params.boxed() as _)
+        }
+
+        fn peer_identity(&self) -> Option<Box<dyn Any>> {
+            None
+        }
+
+        fn early_crypto(&self) -> Option<(Box<dyn HeaderKey>, Box<dyn PacketKey>)> {
+            None
+        }
+
+        fn early_data_accepted(&self) -> Option<bool> {
+            Some(false)
+        }
+
+        #[instrument(level = "trace")]
+        fn is_handshaking(&self) -> bool {
+            self.remote.is_none() || self.state != HandshakeState::Done
+        }
+
+        #[instrument(level = "trace")]
+        fn read_handshake(&mut self, mut buf: &[u8]) -> Result<bool, TransportError> {
+            if self.remote.is_none() {
+                self.remote = Some(
+                    TransportParameters::read(self.side, &mut buf)
+                        .expect("failed to read transport parameters"),
+                );
+            }
+            Ok(true)
+        }
+
+        #[instrument(level = "trace")]
+        fn transport_parameters(&self) -> Result<Option<TransportParameters>, TransportError> {
+            Ok(self.remote)
+        }
+
+        #[instrument(level = "trace")]
+        fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys> {
+            match self.state {
+                HandshakeState::EmitInitial => {
+                    if self.side.is_client() {
+                        self.local.write(buf);
+                    }
+                    self.state = HandshakeState::EmitHandshake;
+                    Some(self.key.keys())
+                }
+                HandshakeState::EmitHandshake => {
+                    if self.side.is_server() {
+                        self.local.write(buf);
+                    }
+                    self.state = HandshakeState::Done;
+                    Some(self.key.keys())
+                }
+                HandshakeState::Done => None,
+            }
+        }
+
+        fn next_1rtt_keys(&mut self) -> Option<KeyPair<Box<dyn PacketKey>>> {
+            Some(self.key.packet())
+        }
+
+        fn is_valid_retry(&self, _: &ConnectionId, _: &[u8], _: &[u8]) -> bool {
+            true
+        }
+
+        fn export_keying_material(
+            &self,
+            _: &mut [u8],
+            _: &[u8],
+            _: &[u8],
+        ) -> Result<(), ExportKeyingMaterialError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct CryptoConfig;
+
+    impl ClientConfig for CryptoConfig {
+        #[instrument(level = "trace")]
+        fn start_session(
+            self: Arc<Self>,
+            version: u32,
+            server_name: &str,
+            params: &TransportParameters,
+        ) -> Result<Box<dyn Session>, ConnectError> {
+            Ok(Box::new(QuicSession::new(Side::Client, version, *params)))
+        }
+    }
+
+    impl ServerConfig for CryptoConfig {
+        fn initial_keys(&self, version: u32, _: &ConnectionId) -> Result<Keys, UnsupportedVersion> {
+            Ok(CryptoKey::for_version(version).keys())
+        }
+
+        fn retry_tag(&self, _: u32, _: &ConnectionId, _: &[u8]) -> [u8; 16] {
+            [0u8; 16]
+        }
+
+        #[instrument(level = "trace")]
+        fn start_session(
+            self: Arc<Self>,
+            version: u32,
+            params: &TransportParameters,
+        ) -> Box<dyn Session> {
+            Box::new(QuicSession::new(Side::Server, version, *params))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn roundtrip(pn_bound: bool, encrypt_pn: u64, decrypt_pn: u64) -> Result<(), CryptoError> {
+            let key = CryptoKey { pn_bound };
+            let mut buf = vec![7u8; 8 + 32 + key.tag_len()];
+            quinn_proto::crypto::PacketKey::encrypt(&key, encrypt_pn, &mut buf, 8);
+            let header = buf[..8].to_vec();
+            let mut payload = BytesMut::from(&buf[8..]);
+            quinn_proto::crypto::PacketKey::decrypt(&key, decrypt_pn, &header, &mut payload)
+        }
+
+        #[test]
+        fn legacy_checksum_ignores_packet_number() {
+            // Documents the original flaw: a packet number decoded differently
+            // from how it was encoded still passes authentication.
+            assert!(roundtrip(false, 100, 356).is_ok());
+        }
+
+        #[test]
+        fn pn_bound_checksum_rejects_shifted_packet_number() {
+            assert!(roundtrip(true, 100, 100).is_ok());
+            // A 1-byte truncated packet number decoded one window (+256) ahead,
+            // as happens when reordering exceeds the RFC 9000 Appendix A
+            // decode window, must fail authentication.
+            assert!(roundtrip(true, 100, 356).is_err());
+        }
+    }
+}
+
+/// EasyTier custom QUIC version "ETQ1" (0x45545131, outside the reserved
+/// `0x??a?a?a?a` grease pattern).
+///
+/// Connections negotiated on this version bind the packet integrity checksum
+/// to the packet number. With the legacy checksum, a 1-byte-encoded packet
+/// number that arrives re-ordered beyond the decode window (RFC 9000
+/// Appendix A) is decoded as a future packet number; the checksum still
+/// passes, the peer ACKs a number that was never sent, and the connection is
+/// torn down with `PROTOCOL_VIOLATION("unsent packet acked")`. Binding the
+/// checksum to the packet number makes such a misdecode fail authentication,
+/// mirroring real QUIC where the AEAD nonce is derived from the packet
+/// number.
+///
+/// Used by both the QUIC proxy and the quic:// tunnel. Peers that only speak
+/// version 1 reject it via version negotiation, so dialers must fall back to
+/// [`client_config`] on `VersionMismatch` (see [`connect_with_etq1`]).
+pub const QUIC_VERSION_ETQ1: u32 = 0x45545131;
+
+pub fn transport_config() -> Arc<TransportConfig> {
+    let mut config = TransportConfig::default();
+
+    config
+        .max_concurrent_bidi_streams(u8::MAX.into())
+        .max_concurrent_uni_streams(0u8.into())
+        .keep_alive_interval(Some(Duration::from_secs(5)))
+        .initial_mtu(1200)
+        .min_mtu(1200)
+        .enable_segmentation_offload(true)
+        .congestion_controller_factory(Arc::new(BbrConfig::default()));
+
+    Arc::new(config)
+}
+
+pub fn server_config() -> ServerConfig {
+    let mut config = ServerConfig::with_crypto(Arc::new(crypto::CryptoConfig));
+    config.transport_config(transport_config());
+    config
+}
+
+pub fn client_config() -> ClientConfig {
+    let mut config = ClientConfig::new(Arc::new(crypto::CryptoConfig));
+    config.transport_config(transport_config());
+    config
+}
+
+/// Client config negotiating [`QUIC_VERSION_ETQ1`], the first choice of
+/// dialers that support the fallback (see [`connect_with_etq1`]).
+pub fn etq1_client_config() -> ClientConfig {
+    let mut config = client_config();
+    config.version(QUIC_VERSION_ETQ1);
+    config
+}
+
+pub(crate) fn endpoint_config_with_versions(versions: Vec<u32>) -> EndpointConfig {
+    let mut config = EndpointConfig::default();
+    config.max_udp_payload_size(1200).unwrap();
+    config.supported_versions(versions);
+    config
+}
+
+/// Endpoint config accepting both [`QUIC_VERSION_ETQ1`] and legacy version
+/// 1, so new dialers negotiate ETQ1 while old peers keep working.
+pub fn endpoint_config() -> EndpointConfig {
+    endpoint_config_with_versions(vec![QUIC_VERSION_ETQ1, 1])
+}
+
+/// Dial `endpoint` preferring [`QUIC_VERSION_ETQ1`], falling back to legacy
+/// version 1 when the remote rejects ETQ1 via version negotiation.
+pub(crate) async fn connect_with_etq1(
+    endpoint: &Endpoint,
+    addr: SocketAddr,
+    server_name: &str,
+) -> anyhow::Result<Connection> {
+    match endpoint
+        .connect_with(etq1_client_config(), addr, server_name)
+        .with_context(|| format!("failed to start connection to {addr}"))?
+        .await
+    {
+        Ok(connection) => Ok(connection),
+        Err(ConnectionError::VersionMismatch) => endpoint
+            .connect_with(client_config(), addr, server_name)
+            .with_context(|| format!("failed to start connection to {addr}"))?
+            .await
+            .with_context(|| format!("failed to connect to {addr}")),
+        Err(error) => Err(error).with_context(|| format!("failed to connect to {addr}")),
+    }
+}
+//endregion
+
+pub(crate) async fn upgrade_connected(
+    connected: ConnectedUdpSession,
+    remote_url: url::Url,
+) -> Result<Box<dyn Tunnel>, TunnelError> {
+    let socket = Arc::new(QuicUdpSessionSocket::new(connected)?);
+    let local_addr = socket.local_addr()?;
+    let remote_addr = socket.peer_addr();
+    let mut endpoint = session_common::build_session_endpoint(socket, None, endpoint_config())?;
+    endpoint.set_default_client_config(client_config());
+    let connection = connect_with_etq1(&endpoint, remote_addr, "localhost").await?;
+    let (write, read) = connection
+        .open_bi()
+        .await
+        .with_context(|| "open_bi failed")?;
+    let resolved_remote_addr = connection.remote_address();
+    let connection = Arc::new(ConnWrapper::new(connection, endpoint));
+    let bandwidth_source = window_source(&connection.conn);
+    let info = TunnelInfo {
+        tunnel_type: "quic".to_owned(),
+        local_addr: Some(super::build_url_from_socket_addr(&local_addr.to_string(), "quic").into()),
+        remote_addr: Some(remote_url.into()),
+        resolved_remote_addr: Some(
+            super::build_url_from_socket_addr(&resolved_remote_addr.to_string(), "quic").into(),
+        ),
+    };
+    Ok(Box::new(
+        TunnelWrapper::new(
+            FramedReader::new_with_associate_data(
+                read,
+                session_common::MAX_TUNNEL_BODY_SIZE,
+                Some(Box::new(connection.clone())),
+            ),
+            FramedWriter::new_with_associate_data(write, Some(Box::new(connection))),
+            Some(info),
+        )
+        .with_bandwidth_source(Some(bandwidth_source)),
+    ))
+}
+
+pub(crate) struct QuicAcceptedSession {
+    inner: session_common::AcceptedSession,
+}
+
+impl QuicAcceptedSession {
+    pub(crate) fn new(
+        session: UdpSession,
+        local_url: url::Url,
+        admission: ServerProtocolAdmission,
+    ) -> Result<Self, TunnelError> {
+        let (active_session, handshake_slots) = admission.into_parts();
+        Self::new_with_admission_parts(session, local_url, active_session, handshake_slots)
+    }
+
+    fn new_with_admission_parts(
+        session: UdpSession,
+        local_url: url::Url,
+        active_session: OwnedSemaphorePermit,
+        handshakes: Arc<Semaphore>,
+    ) -> Result<Self, TunnelError> {
+        let socket = Arc::new(QuicUdpSessionSocket::from_accepted(
+            session,
+            active_session,
+        )?);
+        let endpoint = session_common::build_session_endpoint(
+            socket,
+            Some(server_config()),
+            endpoint_config(),
+        )?;
+        Ok(Self {
+            inner: session_common::AcceptedSession::start(
+                endpoint, local_url, "quic", "QUIC", handshakes,
+            ),
+        })
+    }
+
+    pub(crate) async fn accept(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
+        self.inner.accept().await
+    }
+}
+
+#[async_trait::async_trait]
+impl ServerTunnelAcceptor for QuicAcceptedSession {
+    async fn accept(&mut self) -> anyhow::Result<Box<dyn Tunnel>> {
+        Ok(QuicAcceptedSession::accept(self).await?)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use easytier_core::{
+        connectivity::protocol::ServerProtocolAdmissionController, socket::SocketListener,
+    };
+    use quinn::default_runtime;
+
+    use super::session_tests::{
+        accept_two_connections_on_same_session, assert_bidirectional_frame_boundaries,
+        assert_second_connection_survives_first_close, connected_udp_session_fixture,
+    };
+    use super::*;
+
+    pub(crate) fn assert_bbr_controller(connection: &Connection) {
+        let controller = connection.congestion_state().into_any();
+        assert!(controller.is::<quinn::congestion::Bbr>());
+    }
+
+    pub(crate) async fn assert_endpoint_controllers(
+        client_config: ClientConfig,
+        server_config: ServerConfig,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let runtime = default_runtime().unwrap();
+            let server_endpoint = Endpoint::new(
+                endpoint_config(),
+                Some(server_config),
+                std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+                runtime.clone(),
+            )
+            .unwrap();
+            let mut client_endpoint = Endpoint::new(
+                endpoint_config(),
+                None,
+                std::net::UdpSocket::bind("127.0.0.1:0").unwrap(),
+                runtime,
+            )
+            .unwrap();
+            client_endpoint.set_default_client_config(client_config);
+            let connecting = client_endpoint
+                .connect(server_endpoint.local_addr().unwrap(), "localhost")
+                .unwrap();
+            let (client, server) = tokio::join!(connecting, async {
+                server_endpoint.accept().await.unwrap().await.unwrap()
+            });
+            let client = client.unwrap();
+            assert_bbr_controller(&client);
+            assert_bbr_controller(&server);
+            let client_source = window_source(&client);
+            let server_source = window_source(&server);
+            for source in [&client_source, &server_source] {
+                let window = source
+                    .transmission_window()
+                    .expect("a newly established QUIC path must expose its sending window");
+                assert_eq!(
+                    window.congestion_control,
+                    easytier_core::foundation::bandwidth::CongestionControl::Bbr,
+                );
+                assert!(window.congestion_window_bytes > 0);
+                assert!(window.estimated_bps().is_some());
+            }
+            client_endpoint.close(0u32.into(), b"test done");
+            server_endpoint.close(0u32.into(), b"test done");
+            let _ = tokio::join!(client.closed(), server.closed());
+            assert!(client_source.transmission_window().is_none());
+            assert!(server_source.transmission_window().is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn quic_endpoints_use_bbr() {
+        assert_endpoint_controllers(client_config(), server_config()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quic_tunnel_enforces_bidirectional_frame_boundary() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut listener, connected, _) = connected_udp_session_fixture("quic").await;
+            let local_url = listener.local_url();
+            let remote_url = local_url.clone();
+            let server_task = tokio::spawn(async move {
+                let session = listener.accept().await.unwrap();
+                let admission = ServerProtocolAdmissionController::quic()
+                    .try_admit()
+                    .unwrap();
+                let mut accepted = QuicAcceptedSession::new(session, local_url, admission).unwrap();
+                accepted.accept().await.unwrap()
+            });
+            let client = upgrade_connected(connected, remote_url).await.unwrap();
+            assert_bidirectional_frame_boundaries(client, server_task).await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepted_udp_session_supports_multiple_quic_connections() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut listener, connected, remote_addr) =
+                connected_udp_session_fixture("quic").await;
+            let local_url = listener.local_url();
+            let socket = Arc::new(QuicUdpSessionSocket::new(connected).unwrap());
+            let runtime = default_runtime().unwrap();
+            let mut endpoint =
+                Endpoint::new_with_abstract_socket(endpoint_config(), None, socket, runtime)
+                    .unwrap();
+            endpoint.set_default_client_config(client_config());
+            let server_task = tokio::spawn(async move {
+                let session = listener.accept().await.unwrap();
+                let admission = ServerProtocolAdmissionController::new(1, 2)
+                    .try_admit()
+                    .unwrap();
+                let mut accepted = QuicAcceptedSession::new(session, local_url, admission).unwrap();
+                accept_two_connections_on_same_session(&mut accepted, &mut listener).await
+            });
+
+            assert_second_connection_survives_first_close(
+                endpoint,
+                remote_addr,
+                server_task,
+                "QUIC",
+            )
+            .await;
+        })
+        .await
+        .unwrap();
+    }
+}

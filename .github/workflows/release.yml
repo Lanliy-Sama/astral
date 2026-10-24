@@ -1,0 +1,79 @@
+name: EasyTier Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'Successful full EasyTier Build run ID from this repository'
+        type: number
+        required: true
+      version:
+        description: 'Version tag for this draft release'
+        type: string
+        default: 'v2.7.0'
+        required: true
+      make_latest:
+        description: 'Mark this release as latest when published'
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate complete full build
+        id: build
+        uses: actions/github-script@v8
+        env:
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        with:
+          script: |
+            const validate = require('./.github/scripts/validate-release-builds.js');
+            await validate({ github, context, core });
+
+      - name: Download validated release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.build.outputs.artifact_ids }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+          path: release_artifacts
+          merge-multiple: false
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Prepare release assets and checksums
+        uses: actions/github-script@v8
+        env:
+          BUILD_SHA: ${{ steps.build.outputs.build_sha }}
+          ARTIFACT_METADATA: ${{ steps.build.outputs.artifact_metadata }}
+        with:
+          script: |
+            const { prepareReleaseAssets } = require('./.github/scripts/validate-release-builds.js');
+            await prepareReleaseAssets({
+              sourceDir: 'release_artifacts',
+              destinationDir: 'release_assets',
+              commit: process.env.BUILD_SHA,
+              artifacts: JSON.parse(process.env.ARTIFACT_METADATA),
+            });
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ inputs.version }}
+          tag_name: ${{ inputs.version }}
+          target_commitish: ${{ steps.build.outputs.build_sha }}
+          draft: true
+          make_latest: ${{ inputs.make_latest && 'true' || 'false' }}
+          fail_on_unmatched_files: true
+          files: release_assets/*
+          token: ${{ secrets.GITHUB_TOKEN }}

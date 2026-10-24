@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+import "common.proto";
+import "peer_rpc.proto";
+
+package core.peer;
+
+message PeerConnStats {
+  uint64 rx_bytes = 1;
+  uint64 tx_bytes = 2;
+
+  uint64 rx_packets = 3;
+  uint64 tx_packets = 4;
+
+  uint64 latency_us = 5;
+
+  // Actual transport sending-window/RTT estimates, in bit/s. RX is reported
+  // by the peer's sending transport. Zero means unknown, never a traffic rate.
+  uint64 estimated_rx_bps = 50006;
+  uint64 estimated_tx_bps = 50007;
+  // 1 = transmission-window formula. Missing/0 is the retired traffic estimator.
+  uint32 bandwidth_estimate_version = 50008;
+}
+
+message PeerConnInfo {
+  string conn_id = 1;
+  uint32 my_peer_id = 2;
+  uint32 peer_id = 3;
+  repeated string features = 4;
+  common.TunnelInfo tunnel = 5;
+  PeerConnStats stats = 6;
+  float loss_rate = 7;
+  bool is_client = 8;
+  string network_name = 9;
+  bool is_closed = 10;
+  bytes noise_local_static_pubkey = 11;
+  bytes noise_remote_static_pubkey = 12;
+  peer_rpc.SecureAuthLevel secure_auth_level = 13;
+  peer_rpc.PeerIdentityType peer_identity_type = 14;
+}
+
+message PeerInfo {
+  uint32 peer_id = 1;
+  repeated PeerConnInfo conns = 2;
+  common.UUID default_conn_id = 3;
+  repeated common.UUID directly_connected_conns = 4;
+  common.ParallelConnectionStatus parallel_connections = 50001;
+}
+
+message Route {
+  uint32 peer_id = 1;
+  common.Ipv4Inet ipv4_addr = 2;
+
+  uint32 next_hop_peer_id = 3;
+  int32 cost = 4;
+  int32 path_latency = 11;
+
+  repeated string proxy_cidrs = 5;
+  string hostname = 6;
+  common.StunInfo stun_info = 7;
+  string inst_id = 8;
+  string version = 9;
+  common.PeerFeatureFlag feature_flag = 10;
+
+  optional uint32 next_hop_peer_id_latency_first = 12;
+  optional int32 cost_latency_first = 13;
+  optional int32 path_latency_latency_first = 14;
+
+  common.Ipv6Inet ipv6_addr = 15;
+}

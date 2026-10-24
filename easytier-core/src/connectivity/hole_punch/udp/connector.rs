@@ -1,0 +1,648 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use anyhow::Error;
+use dashmap::DashMap;
+use quanta::Instant;
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard, TryLockError},
+    task::JoinHandle,
+};
+
+use crate::{
+    config::PeerId,
+    connectivity::stun::StunInfoProvider,
+    foundation::expiring_set::ExpiringSet,
+    foundation::task::{ExternalTaskSignal, PeerTaskLauncher, PeerTaskManager},
+    proto::common::NatType,
+};
+
+use crate::connectivity::hole_punch::PEER_BLACKLIST_TIMEOUT;
+use crate::connectivity::hole_punch::policy::BackOff;
+
+use super::{
+    UdpBothEasySymPunchClient, UdpHolePunchClientError, UdpHolePunchPeerSource,
+    UdpHolePunchRuntime, UdpHolePunchSignaling, UdpHolePunchTransportSink, UdpNatType,
+    UdpPunchClientMethod, UdpPunchScheme, UdpPunchSocket, UdpPunchTaskInfo,
+    UdpSymToConePunchClient, collect_udp_punch_tasks, punch_cone_to_cone,
+    should_blacklist_signal_error,
+};
+
+fn udp_attempt_ready(
+    scheme: UdpPunchScheme,
+    preferred_elapsed: Option<std::time::Duration>,
+) -> bool {
+    // Only raw UDP fallback waits for the disguised transports. HTTP3 itself
+    // must enter the first scheduling round, even when WSS is already up.
+    scheme == UdpPunchScheme::Http3
+        || preferred_elapsed.is_none_or(|elapsed| elapsed.as_secs() >= 30)
+}
+
+fn ready_udp_attempts(
+    task: UdpPunchTaskInfo,
+    raw_fallback_allowed: bool,
+    preferred_elapsed: Option<std::time::Duration>,
+) -> Vec<UdpPunchTaskInfo> {
+    let mut attempts = Vec::with_capacity(2);
+    if udp_attempt_ready(task.scheme, preferred_elapsed) {
+        attempts.push(task);
+    }
+    if task.scheme == UdpPunchScheme::Http3
+        && raw_fallback_allowed
+        && !task.require_http3
+        && udp_attempt_ready(UdpPunchScheme::Udp, preferred_elapsed)
+    {
+        attempts.push(UdpPunchTaskInfo {
+            scheme: UdpPunchScheme::Udp,
+            ..task
+        });
+    }
+    attempts
+}
+
+#[derive(Clone, Default)]
+pub struct UdpSymPunchLock {
+    inner: Arc<Mutex<()>>,
+}
+
+impl UdpSymPunchLock {
+    pub(crate) async fn lock(&self) -> OwnedMutexGuard<()> {
+        self.inner.clone().lock_owned().await
+    }
+
+    pub(crate) fn try_lock(&self) -> Result<OwnedMutexGuard<()>, TryLockError> {
+        self.inner.clone().try_lock_owned()
+    }
+}
+
+struct UdpHolePunchConnectorParts<P, S, T, R>
+where
+    P: UdpHolePunchPeerSource + 'static,
+    S: UdpHolePunchSignaling + 'static,
+    T: UdpHolePunchTransportSink + 'static,
+    R: UdpHolePunchRuntime,
+{
+    peer_source: Arc<P>,
+    signaling: Arc<S>,
+    transport_sink: Arc<T>,
+    runtime: Arc<R>,
+    stun: Arc<dyn StunInfoProvider>,
+    sym_punch_lock: UdpSymPunchLock,
+}
+
+pub struct UdpHolePunchConnectorData<P, S, T, R>
+where
+    P: UdpHolePunchPeerSource + 'static,
+    S: UdpHolePunchSignaling + 'static,
+    T: UdpHolePunchTransportSink + 'static,
+    R: UdpHolePunchRuntime,
+{
+    peer_source: Arc<P>,
+    signaling: Arc<S>,
+    transport_sink: Arc<T>,
+    runtime: Arc<R>,
+    stun: Arc<dyn StunInfoProvider>,
+    sym_punch_lock: UdpSymPunchLock,
+    blacklist: ExpiringSet<PeerId>,
+    preferred_attempt_started: DashMap<PeerId, Instant>,
+    pub sym_to_cone_client: UdpSymToConePunchClient<R, S>,
+    pub both_easy_sym_client: UdpBothEasySymPunchClient<R, S>,
+}
+
+impl<P, S, T, R> UdpHolePunchConnectorData<P, S, T, R>
+where
+    P: UdpHolePunchPeerSource + 'static,
+    S: UdpHolePunchSignaling + 'static,
+    T: UdpHolePunchTransportSink + 'static,
+    R: UdpHolePunchRuntime,
+{
+    fn new(parts: Arc<UdpHolePunchConnectorParts<P, S, T, R>>) -> Arc<Self> {
+        Arc::new(Self {
+            peer_source: parts.peer_source.clone(),
+            signaling: parts.signaling.clone(),
+            transport_sink: parts.transport_sink.clone(),
+            runtime: parts.runtime.clone(),
+            stun: parts.stun.clone(),
+            sym_punch_lock: parts.sym_punch_lock.clone(),
+            blacklist: ExpiringSet::default(),
+            preferred_attempt_started: DashMap::new(),
+            sym_to_cone_client: UdpSymToConePunchClient::new(
+                parts.runtime.clone(),
+                parts.signaling.clone(),
+                parts.stun.clone(),
+            ),
+            both_easy_sym_client: UdpBothEasySymPunchClient::new(
+                parts.runtime.clone(),
+                parts.signaling.clone(),
+                parts.stun.clone(),
+            ),
+        })
+    }
+
+    fn should_skip_blacklisted(&self, peer_id: PeerId) -> bool {
+        if self.blacklist.contains(&peer_id) {
+            tracing::debug!(
+                dst_peer_id = peer_id,
+                "peer is blacklisted, skipping hole punching"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Both sym-aware clients try a plain cone punch before dedicating the
+    /// sym punch lock: it is cheaper and often sufficient. Returns `true`
+    /// when the caller should break out of its retry loop (punch succeeded
+    /// or the peer got blacklisted).
+    async fn try_cone_preflight(&self, task_info: &UdpPunchTaskInfo) -> bool {
+        let ret = punch_cone_to_cone(
+            self.runtime.clone(),
+            self.signaling.clone(),
+            task_info.dst_peer_id,
+            task_info.scheme,
+            task_info.require_http3,
+        )
+        .await;
+        let ret = self.map_client_result(task_info.dst_peer_id, ret);
+        if self.handle_punch_result(task_info, ret, None, None).await {
+            return true;
+        }
+        self.should_skip_blacklisted(task_info.dst_peer_id)
+    }
+
+    fn map_client_result(
+        &self,
+        dst_peer_id: PeerId,
+        ret: Result<Option<UdpPunchSocket>, UdpHolePunchClientError>,
+    ) -> Result<Option<UdpPunchSocket>, Error> {
+        match ret {
+            Ok(ret) => Ok(ret),
+            Err(UdpHolePunchClientError::Signaling(err)) => {
+                if should_blacklist_signal_error(&err) {
+                    self.blacklist.insert(dst_peer_id, PEER_BLACKLIST_TIMEOUT);
+                }
+                Err(err.into())
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn handle_punch_result(
+        &self,
+        task_info: &UdpPunchTaskInfo,
+        ret: Result<Option<UdpPunchSocket>, Error>,
+        backoff: Option<&mut BackOff>,
+        round: Option<&mut u32>,
+    ) -> bool {
+        let op = |rollback: bool| {
+            if rollback {
+                if let Some(backoff) = backoff {
+                    backoff.rollback();
+                }
+                if let Some(round) = round {
+                    *round = round.saturating_sub(1);
+                }
+            } else if let Some(round) = round {
+                *round += 1;
+            }
+        };
+
+        match ret {
+            Ok(Some(socket)) => {
+                let (connected, requested_url) = socket.into_connected();
+                let scheme = requested_url.scheme().to_owned();
+                if task_info.require_http3 && scheme != "http3" {
+                    tracing::warn!(
+                        peer_id = task_info.dst_peer_id,
+                        %scheme,
+                        "rejecting downgraded UDP hole-punch transport"
+                    );
+                    op(true);
+                    return false;
+                }
+                if let Err(err) = self
+                    .transport_sink
+                    .add_client_transport(connected, requested_url)
+                    .await
+                {
+                    tracing::warn!(?err, %scheme, "upgrade or add UDP hole-punch transport failed");
+                    op(true);
+                    false
+                } else {
+                    tracing::info!(
+                        %scheme,
+                        "hole punching transport admitted; awaiting liveness measurement"
+                    );
+                    true
+                }
+            }
+            Ok(None) => {
+                tracing::info!("hole punching failed, no punched socket");
+                op(false);
+                false
+            }
+            Err(err) => {
+                tracing::info!(?err, "hole punching failed");
+                op(true);
+                false
+            }
+        }
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn cone_to_cone(self: Arc<Self>, task_info: UdpPunchTaskInfo) -> Result<(), Error> {
+        let mut backoff = BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000]);
+
+        loop {
+            backoff.sleep_for_next_backoff().await;
+
+            if self.should_skip_blacklisted(task_info.dst_peer_id) {
+                break;
+            }
+
+            let ret = punch_cone_to_cone(
+                self.runtime.clone(),
+                self.signaling.clone(),
+                task_info.dst_peer_id,
+                task_info.scheme,
+                task_info.require_http3,
+            )
+            .await;
+            let ret = self.map_client_result(task_info.dst_peer_id, ret);
+
+            if self
+                .handle_punch_result(&task_info, ret, Some(&mut backoff), None)
+                .await
+            {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn sym_to_cone(self: Arc<Self>, task_info: UdpPunchTaskInfo) -> Result<(), Error> {
+        let mut backoff =
+            BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000]);
+        let mut round = 0;
+        let mut port_idx = rand::random();
+
+        loop {
+            backoff.sleep_for_next_backoff().await;
+
+            if self.should_skip_blacklisted(task_info.dst_peer_id) {
+                break;
+            }
+
+            if self.try_cone_preflight(&task_info).await {
+                break;
+            }
+
+            let ret = {
+                let _lock = self.sym_punch_lock.lock().await;
+                self.sym_to_cone_client
+                    .do_hole_punching(
+                        task_info.dst_peer_id,
+                        round,
+                        &mut port_idx,
+                        task_info.my_nat_type,
+                        task_info.scheme,
+                        task_info.require_http3,
+                    )
+                    .await
+            };
+            let ret = self.map_client_result(task_info.dst_peer_id, ret);
+
+            if self
+                .handle_punch_result(&task_info, ret, Some(&mut backoff), Some(&mut round))
+                .await
+            {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn both_easy_sym(self: Arc<Self>, task_info: UdpPunchTaskInfo) -> Result<(), Error> {
+        let mut backoff =
+            BackOff::new(vec![1000, 1000, 2000, 4000, 4000, 8000, 8000, 16000, 64000]);
+
+        loop {
+            backoff.sleep_for_next_backoff().await;
+
+            if self.should_skip_blacklisted(task_info.dst_peer_id) {
+                break;
+            }
+
+            if self.try_cone_preflight(&task_info).await {
+                break;
+            }
+
+            let mut is_busy = false;
+            let ret = {
+                let _lock = self.sym_punch_lock.lock().await;
+                self.both_easy_sym_client
+                    .do_hole_punching(
+                        task_info.dst_peer_id,
+                        task_info.my_nat_type,
+                        task_info.dst_nat_type,
+                        task_info.scheme,
+                        task_info.require_http3,
+                        &mut is_busy,
+                    )
+                    .await
+            };
+            let ret = self.map_client_result(task_info.dst_peer_id, ret);
+
+            if is_busy {
+                backoff.rollback();
+            } else if self
+                .handle_punch_result(&task_info, ret, Some(&mut backoff), None)
+                .await
+            {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct UdpHolePunchPeerTaskLauncher<P, S, T, R>(Arc<UdpHolePunchConnectorData<P, S, T, R>>)
+where
+    P: UdpHolePunchPeerSource + 'static,
+    S: UdpHolePunchSignaling + 'static,
+    T: UdpHolePunchTransportSink + 'static,
+    R: UdpHolePunchRuntime;
+
+impl<P, S, T, R> Clone for UdpHolePunchPeerTaskLauncher<P, S, T, R>
+where
+    P: UdpHolePunchPeerSource + 'static,
+    S: UdpHolePunchSignaling + 'static,
+    T: UdpHolePunchTransportSink + 'static,
+    R: UdpHolePunchRuntime,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl<P, S, T, R> PeerTaskLauncher for UdpHolePunchPeerTaskLauncher<P, S, T, R>
+where
+    P: UdpHolePunchPeerSource + 'static,
+    S: UdpHolePunchSignaling + 'static,
+    T: UdpHolePunchTransportSink + 'static,
+    R: UdpHolePunchRuntime,
+{
+    type CollectPeerItem = UdpPunchTaskInfo;
+    type TaskRet = ();
+
+    fn task_kind(&self) -> &'static str {
+        "udp hole punching"
+    }
+
+    async fn collect_peers_need_task(&self) -> Vec<Self::CollectPeerItem> {
+        let data = &self.0;
+        let my_nat_type = data.stun.get_stun_info().udp_nat_type;
+        let my_nat_type: UdpNatType = NatType::try_from(my_nat_type)
+            .unwrap_or(NatType::Unknown)
+            .into();
+        if !my_nat_type.is_sym() {
+            data.sym_to_cone_client.clear_udp_array().await;
+        }
+
+        if my_nat_type.is_open() {
+            return Vec::new();
+        }
+
+        data.blacklist.cleanup();
+
+        let my_peer_id = data.peer_source.local_peer_id();
+        let policy = data.peer_source.p2p_policy_flags();
+        let candidates = data.peer_source.candidates().await;
+        let raw_fallback_peers: HashSet<_> = candidates
+            .iter()
+            .filter(|candidate| {
+                !candidate.udp_satisfied
+                    && policy.allow_raw_with_peer(&candidate.peer_disguise_flags)
+            })
+            .map(|candidate| candidate.peer_id)
+            .collect();
+        data.preferred_attempt_started.retain(|peer_id, _| {
+            candidates.iter().any(|candidate| {
+                candidate.peer_id == *peer_id
+                    && policy.use_wss_http3_with_peer(&candidate.peer_disguise_flags)
+            })
+        });
+        for candidate in &candidates {
+            if policy.use_wss_http3_with_peer(&candidate.peer_disguise_flags) {
+                data.preferred_attempt_started
+                    .entry(candidate.peer_id)
+                    .or_insert_with(Instant::now);
+            }
+        }
+        let peers_to_connect = collect_udp_punch_tasks(
+            my_peer_id,
+            my_nat_type,
+            policy,
+            data.transport_sink.supports_scheme("http3"),
+            candidates,
+            |peer_id| data.blacklist.contains(&peer_id),
+        )
+        .into_iter()
+        .flat_map(|task| {
+            ready_udp_attempts(
+                task,
+                raw_fallback_peers.contains(&task.dst_peer_id),
+                data.preferred_attempt_started
+                    .get(&task.dst_peer_id)
+                    .map(|started| started.elapsed()),
+            )
+        })
+        .collect::<Vec<_>>();
+        for task in &peers_to_connect {
+            tracing::info!(
+                peer_id = task.dst_peer_id,
+                peer_nat_type = ?task.dst_nat_type,
+                ?my_nat_type,
+                scheme = task.scheme.as_str(),
+                "found peer to do hole punching"
+            );
+        }
+
+        peers_to_connect
+    }
+
+    async fn launch_task(
+        &self,
+        item: Self::CollectPeerItem,
+    ) -> JoinHandle<Result<Self::TaskRet, Error>> {
+        let data = self.0.clone();
+        let disable_sym_hole_punching = data
+            .peer_source
+            .p2p_policy_flags()
+            .disable_sym_hole_punching;
+        let punch_method = item
+            .my_nat_type
+            .get_punch_hole_method(item.dst_nat_type, disable_sym_hole_punching);
+        tokio::spawn(async move {
+            let reservation = data
+                .peer_source
+                .reserve_parallel_slot_for_protocol(item.dst_peer_id, item.scheme.as_str());
+            if data
+                .peer_source
+                .parallel_connection_target(item.dst_peer_id)
+                > 1
+                && reservation.is_none()
+            {
+                return Ok(());
+            }
+            let work = async move {
+                match punch_method {
+                    UdpPunchClientMethod::ConeToCone => data.cone_to_cone(item).await,
+                    UdpPunchClientMethod::SymToCone => data.sym_to_cone(item).await,
+                    UdpPunchClientMethod::EasySymToEasySym => data.both_easy_sym(item).await,
+                    _ => unreachable!(),
+                }
+            };
+            match reservation {
+                Some(reservation) => reservation.scope(work).await,
+                None => work.await,
+            }
+        })
+    }
+
+    async fn all_task_done(&self) {
+        self.0.sym_to_cone_client.clear_udp_array().await;
+    }
+
+    fn loop_interval_ms(&self) -> u64 {
+        5000
+    }
+}
+
+pub struct UdpHolePunchConnector<P, S, T, R>
+where
+    P: UdpHolePunchPeerSource + 'static,
+    S: UdpHolePunchSignaling + 'static,
+    T: UdpHolePunchTransportSink + 'static,
+    R: UdpHolePunchRuntime,
+{
+    client: PeerTaskManager<UdpHolePunchPeerTaskLauncher<P, S, T, R>>,
+}
+
+impl<P, S, T, R> UdpHolePunchConnector<P, S, T, R>
+where
+    P: UdpHolePunchPeerSource + 'static,
+    S: UdpHolePunchSignaling + 'static,
+    T: UdpHolePunchTransportSink + 'static,
+    R: UdpHolePunchRuntime,
+{
+    pub fn new(
+        peer_source: Arc<P>,
+        signaling: Arc<S>,
+        transport_sink: Arc<T>,
+        runtime: Arc<R>,
+        stun: Arc<dyn StunInfoProvider>,
+        sym_punch_lock: UdpSymPunchLock,
+        external_signal: Option<Arc<ExternalTaskSignal>>,
+    ) -> Self {
+        let parts = Arc::new(UdpHolePunchConnectorParts {
+            peer_source,
+            signaling,
+            transport_sink,
+            runtime,
+            stun,
+            sym_punch_lock,
+        });
+        let data = UdpHolePunchConnectorData::new(parts);
+        Self {
+            client: PeerTaskManager::new_with_external_signal(
+                UdpHolePunchPeerTaskLauncher(data),
+                external_signal,
+            ),
+        }
+    }
+
+    pub fn run_as_client(&self) {
+        self.client.start();
+    }
+
+    pub async fn stop(&self) {
+        self.client.stop().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        UdpPunchScheme, UdpPunchTaskInfo, UdpSymPunchLock, ready_udp_attempts, udp_attempt_ready,
+    };
+
+    #[test]
+    fn http3_starts_immediately_while_raw_fallback_keeps_its_grace_period() {
+        use std::time::Duration;
+        assert!(udp_attempt_ready(
+            UdpPunchScheme::Http3,
+            Some(Duration::ZERO)
+        ));
+        assert!(!udp_attempt_ready(
+            UdpPunchScheme::Udp,
+            Some(Duration::from_secs(29))
+        ));
+        assert!(udp_attempt_ready(
+            UdpPunchScheme::Udp,
+            Some(Duration::from_secs(30))
+        ));
+        assert!(udp_attempt_ready(UdpPunchScheme::Udp, None));
+    }
+
+    #[test]
+    fn symmetric_punch_locks_are_scoped_per_instance() {
+        let first = UdpSymPunchLock::default();
+        let first_clone = first.clone();
+        let second = UdpSymPunchLock::default();
+
+        let _first_guard = first.try_lock().unwrap();
+        assert!(first_clone.try_lock().is_err());
+        assert!(second.try_lock().is_ok());
+    }
+
+    #[test]
+    fn failed_http3_can_fall_back_after_grace_but_strict_or_better_paths_do_not() {
+        use std::time::Duration;
+        let task = UdpPunchTaskInfo {
+            scheme: UdpPunchScheme::Http3,
+            require_http3: false,
+            dst_peer_id: 2,
+            dst_nat_type: crate::proto::common::NatType::PortRestricted.into(),
+            my_nat_type: crate::proto::common::NatType::PortRestricted.into(),
+        };
+        assert_eq!(
+            ready_udp_attempts(task, true, Some(Duration::ZERO)),
+            vec![task]
+        );
+        let attempts = ready_udp_attempts(task, true, Some(Duration::from_secs(30)));
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].scheme, UdpPunchScheme::Http3);
+        assert_eq!(attempts[1].scheme, UdpPunchScheme::Udp);
+        assert_eq!(
+            ready_udp_attempts(task, false, Some(Duration::from_secs(30))),
+            vec![task]
+        );
+        let strict = UdpPunchTaskInfo {
+            require_http3: true,
+            ..task
+        };
+        assert_eq!(
+            ready_udp_attempts(strict, true, Some(Duration::from_secs(30))),
+            vec![strict]
+        );
+    }
+}

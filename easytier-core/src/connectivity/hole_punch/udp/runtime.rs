@@ -1,0 +1,893 @@
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+use url::Url;
+
+use super::super::{HolePunchTunnelSink, port_mapping::UdpPortMappingLease};
+
+use crate::{
+    config::P2pPolicyFlags,
+    connectivity::{
+        protocol::{
+            ClientProtocolUpgrader, ServerProtocolAdmissionController, ServerProtocolUpgrader,
+        },
+        transport::{ConnectedTransport, ConnectedUdpSession},
+    },
+    foundation::task::ExternalTaskSignal,
+    peers::PeerConnectionOrigin,
+    socket::{
+        ListenerConnectionCounter, SocketContext,
+        udp::{
+            UdpBindOptions, UdpHolePunchObserverRegistry, UdpSession, UdpSessionSocket,
+            VirtualUdpSocket, VirtualUdpSocketFactory,
+        },
+    },
+    tunnel::Tunnel,
+};
+
+#[async_trait]
+pub trait UdpPunchAcceptor: Send {
+    async fn accept(&mut self) -> anyhow::Result<UdpPunchSocket>;
+}
+
+pub struct UdpPunchSocket {
+    session: UdpSession,
+    requested_remote_addr: SocketAddr,
+    lifetime_guard: Box<dyn Send + Sync>,
+    scheme: &'static str,
+}
+
+impl UdpPunchSocket {
+    pub fn new<G>(session: UdpSession, requested_remote_addr: SocketAddr, lifetime_guard: G) -> Self
+    where
+        G: Send + Sync + 'static,
+    {
+        Self {
+            session,
+            requested_remote_addr,
+            lifetime_guard: Box::new(lifetime_guard),
+            scheme: "udp",
+        }
+    }
+
+    pub fn new_with_scheme<G>(
+        session: UdpSession,
+        requested_remote_addr: SocketAddr,
+        lifetime_guard: G,
+        scheme: &'static str,
+    ) -> Self
+    where
+        G: Send + Sync + 'static,
+    {
+        Self {
+            session,
+            requested_remote_addr,
+            lifetime_guard: Box::new(lifetime_guard),
+            scheme,
+        }
+    }
+
+    pub(crate) fn into_connected(self) -> (ConnectedUdpSession, url::Url) {
+        (
+            ConnectedUdpSession::new(self.session, self.lifetime_guard),
+            punch_url(self.scheme, self.requested_remote_addr),
+        )
+    }
+}
+
+impl std::fmt::Debug for UdpPunchSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpPunchSocket")
+            .field("session", &self.session)
+            .field("requested_remote_addr", &self.requested_remote_addr)
+            .field("scheme", &self.scheme)
+            .finish_non_exhaustive()
+    }
+}
+
+fn punch_url(scheme: &str, addr: SocketAddr) -> url::Url {
+    let base = match scheme {
+        "http3" => "http3://0.0.0.0",
+        _ => "udp://0.0.0.0",
+    };
+    let mut url = Url::parse(base).expect("static UDP URL should be valid");
+    url.set_ip_host(addr.ip())
+        .expect("socket IP should be a valid URL host");
+    url.set_port(Some(addr.port()))
+        .expect("UDP URL should accept a port");
+    url
+}
+
+pub struct UdpPunchListener<S> {
+    pub socket: Arc<S>,
+    pub hole_punch_observers: UdpHolePunchObserverRegistry,
+    pub mapped_addr: SocketAddr,
+    pub conn_counter: Arc<dyn ListenerConnectionCounter>,
+    pub acceptor: Box<dyn UdpPunchAcceptor>,
+    pub(crate) port_mapping_lease: Option<Box<dyn UdpPortMappingLease>>,
+    pub scheme: UdpPunchScheme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UdpPunchScheme {
+    Udp,
+    Http3,
+    /// Compatibility with peers that encapsulate HTTP3 in EasyTier UDP sessions.
+    Http3Mux,
+}
+
+impl UdpPunchScheme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::Http3 | Self::Http3Mux => "http3",
+        }
+    }
+
+    pub fn is_native_http3(self) -> bool {
+        self == Self::Http3
+    }
+
+    pub fn is_http3(self) -> bool {
+        matches!(self, Self::Http3 | Self::Http3Mux)
+    }
+
+    pub fn from_wire(value: &str, native_http3: bool) -> Self {
+        if value.eq_ignore_ascii_case("http3") {
+            if native_http3 {
+                Self::Http3
+            } else {
+                Self::Http3Mux
+            }
+        } else {
+            Self::Udp
+        }
+    }
+}
+
+pub struct UdpResolvedPublicAddr {
+    pub mapped_addr: SocketAddr,
+    pub(crate) port_mapping_lease: Option<Box<dyn UdpPortMappingLease>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectPunchListener {
+    pub force_new: bool,
+    pub prefer_port_mapping: bool,
+    pub scheme: UdpPunchScheme,
+    pub transaction_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectPunchListenerResponse {
+    pub listener_mapped_addr: SocketAddr,
+    pub scheme: UdpPunchScheme,
+    pub transaction_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendPunchPacketCone {
+    pub listener_mapped_addr: SocketAddr,
+    pub dest_addr: SocketAddr,
+    pub transaction_id: u32,
+    pub packet_count_per_batch: u32,
+    pub packet_batch_count: u32,
+    pub packet_interval_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendPunchPacketHardSym {
+    pub listener_mapped_addr: SocketAddr,
+    pub public_ips: Vec<Ipv4Addr>,
+    pub transaction_id: u32,
+    pub port_index: u32,
+    pub round: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendPunchPacketHardSymResponse {
+    pub next_port_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendPunchPacketEasySym {
+    pub listener_mapped_addr: SocketAddr,
+    pub public_ips: Vec<Ipv4Addr>,
+    pub transaction_id: u32,
+    pub base_port_num: u32,
+    pub max_port_num: u32,
+    pub is_incremental: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendPunchPacketBothEasySym {
+    pub udp_socket_count: u32,
+    pub public_ip: Ipv4Addr,
+    pub transaction_id: u32,
+    pub dst_port_num: u32,
+    pub wait_time_ms: u32,
+    pub scheme: UdpPunchScheme,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendPunchPacketBothEasySymResponse {
+    pub is_busy: bool,
+    pub base_mapped_addr: Option<SocketAddr>,
+    pub scheme: UdpPunchScheme,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum UdpHolePunchSignalError {
+    #[error("invalid service key")]
+    InvalidServiceKey,
+    #[error("timeout")]
+    Timeout,
+    #[error("remote rejected: {0}")]
+    RemoteRejected(String),
+    #[error("transport: {0}")]
+    Transport(String),
+}
+
+pub fn should_blacklist_signal_error(error: &UdpHolePunchSignalError) -> bool {
+    matches!(error, UdpHolePunchSignalError::InvalidServiceKey)
+}
+
+#[async_trait]
+pub trait UdpHolePunchSignaling: Send + Sync {
+    async fn select_punch_listener(
+        &self,
+        dst_peer_id: crate::config::PeerId,
+        request: SelectPunchListener,
+    ) -> Result<SelectPunchListenerResponse, UdpHolePunchSignalError>;
+
+    async fn send_punch_packet_cone(
+        &self,
+        dst_peer_id: crate::config::PeerId,
+        request: SendPunchPacketCone,
+    ) -> Result<(), UdpHolePunchSignalError>;
+
+    async fn send_punch_packet_hard_sym(
+        &self,
+        dst_peer_id: crate::config::PeerId,
+        request: SendPunchPacketHardSym,
+    ) -> Result<SendPunchPacketHardSymResponse, UdpHolePunchSignalError>;
+
+    async fn send_punch_packet_easy_sym(
+        &self,
+        dst_peer_id: crate::config::PeerId,
+        request: SendPunchPacketEasySym,
+    ) -> Result<(), UdpHolePunchSignalError>;
+
+    async fn send_punch_packet_both_easy_sym(
+        &self,
+        dst_peer_id: crate::config::PeerId,
+        request: SendPunchPacketBothEasySym,
+    ) -> Result<SendPunchPacketBothEasySymResponse, UdpHolePunchSignalError>;
+}
+
+#[async_trait]
+pub trait UdpHolePunchInbound: Send + Sync {
+    async fn select_punch_listener(
+        &self,
+        request: SelectPunchListener,
+    ) -> Result<SelectPunchListenerResponse, UdpHolePunchSignalError>;
+
+    async fn send_punch_packet_cone(
+        &self,
+        request: SendPunchPacketCone,
+    ) -> Result<(), UdpHolePunchSignalError>;
+
+    async fn send_punch_packet_hard_sym(
+        &self,
+        request: SendPunchPacketHardSym,
+    ) -> Result<SendPunchPacketHardSymResponse, UdpHolePunchSignalError>;
+
+    async fn send_punch_packet_easy_sym(
+        &self,
+        request: SendPunchPacketEasySym,
+    ) -> Result<(), UdpHolePunchSignalError>;
+
+    async fn send_punch_packet_both_easy_sym(
+        &self,
+        request: SendPunchPacketBothEasySym,
+    ) -> Result<SendPunchPacketBothEasySymResponse, UdpHolePunchSignalError>;
+}
+
+#[async_trait]
+pub trait UdpHolePunchTransportSink: Send + Sync {
+    fn supports_scheme(&self, scheme: &str) -> bool {
+        scheme == "udp"
+    }
+
+    async fn add_client_transport(
+        &self,
+        connected: ConnectedUdpSession,
+        requested_url: url::Url,
+    ) -> anyhow::Result<()>;
+
+    async fn add_server_transport(
+        &self,
+        connected: ConnectedUdpSession,
+        requested_url: url::Url,
+    ) -> anyhow::Result<()>;
+}
+
+pub struct ProtocolUdpHolePunchTransportSink<TcpSocket, T> {
+    protocol: Arc<dyn ClientProtocolUpgrader<TcpSocket>>,
+    http3_server_protocol: Option<Arc<dyn ServerProtocolUpgrader<TcpSocket>>>,
+    http3_admission: Option<ServerProtocolAdmissionController>,
+    tunnel_sink: Arc<T>,
+}
+
+impl<TcpSocket: 'static, T> ProtocolUdpHolePunchTransportSink<TcpSocket, T> {
+    pub fn new(protocol: Arc<dyn ClientProtocolUpgrader<TcpSocket>>, tunnel_sink: Arc<T>) -> Self {
+        Self {
+            protocol,
+            http3_server_protocol: None,
+            http3_admission: None,
+            tunnel_sink,
+        }
+    }
+
+    pub fn with_http3_server(
+        protocol: Arc<dyn ClientProtocolUpgrader<TcpSocket>>,
+        http3_server_protocol: Arc<dyn ServerProtocolUpgrader<TcpSocket>>,
+        tunnel_sink: Arc<T>,
+    ) -> Self {
+        Self {
+            protocol,
+            http3_server_protocol: Some(http3_server_protocol),
+            http3_admission: Some(ServerProtocolAdmissionController::quic()),
+            tunnel_sink,
+        }
+    }
+
+    async fn upgrade(
+        &self,
+        connected: ConnectedUdpSession,
+        requested_url: url::Url,
+    ) -> anyhow::Result<Box<dyn Tunnel>> {
+        self.protocol
+            .upgrade_client(ConnectedTransport::Udp(connected), requested_url)
+            .await
+    }
+
+    async fn add_http3_server_transport(
+        &self,
+        connected: ConnectedUdpSession,
+        requested_url: url::Url,
+    ) -> anyhow::Result<()>
+    where
+        T: HolePunchTunnelSink,
+    {
+        let server_protocol = self
+            .http3_server_protocol
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("HTTP3 hole punching is unsupported"))?;
+        let admission = self
+            .http3_admission
+            .as_ref()
+            .and_then(|controller| controller.try_admit())
+            .ok_or_else(|| anyhow::anyhow!("HTTP3 hole-punch admission limit reached"))?;
+        let (mut session, layer_guard) = connected.into_parts();
+        session.keep_layer_alive(layer_guard);
+        // The punch URL carried by `requested_url` is derived from the remote
+        // peer's address; the server-side tunnel must describe its own local
+        // address, so rebuild the URL from the session's local socket.
+        let local_addr = session.local_addr().map_err(|error| {
+            anyhow::anyhow!("HTTP3 hole-punch session has no local addr: {error}")
+        })?;
+        let local_url = punch_url(requested_url.scheme(), local_addr);
+        let upgrade = server_protocol
+            .upgrade_udp(session, local_url, Some(admission))
+            .await?;
+        let mut acceptor = match upgrade {
+            crate::connectivity::protocol::ServerProtocolUpgrade::Tunnel(tunnel) => {
+                return self
+                    .tunnel_sink
+                    .add_server_tunnel(tunnel, PeerConnectionOrigin::UdpHolePunch)
+                    .await;
+            }
+            crate::connectivity::protocol::ServerProtocolUpgrade::Acceptor(acceptor) => acceptor,
+        };
+        let tunnel = acceptor.accept().await?;
+        self.tunnel_sink
+            .add_server_tunnel(tunnel, PeerConnectionOrigin::UdpHolePunch)
+            .await
+    }
+}
+
+#[async_trait]
+impl<TcpSocket, T> UdpHolePunchTransportSink for ProtocolUdpHolePunchTransportSink<TcpSocket, T>
+where
+    TcpSocket: 'static,
+    T: HolePunchTunnelSink,
+{
+    fn supports_scheme(&self, scheme: &str) -> bool {
+        scheme == "udp" || (scheme == "http3" && self.http3_server_protocol.is_some())
+    }
+
+    async fn add_client_transport(
+        &self,
+        connected: ConnectedUdpSession,
+        requested_url: url::Url,
+    ) -> anyhow::Result<()> {
+        let tunnel = self.upgrade(connected, requested_url).await?;
+        self.tunnel_sink
+            .add_client_tunnel(tunnel, PeerConnectionOrigin::UdpHolePunch)
+            .await
+    }
+
+    async fn add_server_transport(
+        &self,
+        connected: ConnectedUdpSession,
+        requested_url: url::Url,
+    ) -> anyhow::Result<()> {
+        if requested_url.scheme() == "http3" {
+            return self
+                .add_http3_server_transport(connected, requested_url)
+                .await;
+        }
+        let tunnel = self.upgrade(connected, requested_url).await?;
+        self.tunnel_sink
+            .add_server_tunnel(tunnel, PeerConnectionOrigin::UdpHolePunch)
+            .await
+    }
+}
+
+#[async_trait]
+pub trait UdpHolePunchPeerSource: Send + Sync {
+    fn local_peer_id(&self) -> crate::config::PeerId;
+    fn p2p_policy_flags(&self) -> P2pPolicyFlags;
+    fn reserve_parallel_slot_for_protocol(
+        &self,
+        peer_id: crate::config::PeerId,
+        _protocol: &str,
+    ) -> Option<crate::peers::conn::parallel::ParallelDialReservation> {
+        self.reserve_parallel_slot(peer_id)
+    }
+    fn reserve_parallel_slot(
+        &self,
+        _peer_id: crate::config::PeerId,
+    ) -> Option<crate::peers::conn::parallel::ParallelDialReservation> {
+        None
+    }
+    fn parallel_connection_target(&self, _peer_id: crate::config::PeerId) -> u32 {
+        1
+    }
+
+    async fn candidates(&self) -> Vec<super::UdpPunchCandidate>;
+
+    fn p2p_demand_notify(&self) -> Arc<ExternalTaskSignal>;
+
+    fn is_local_virtual_ip(&self, ip: &IpAddr) -> bool;
+
+    async fn is_easytier_managed_ipv6(&self, ip: &Ipv6Addr) -> bool;
+}
+
+/// Gate for inbound UDP punch RPCs: a node that disabled P2P accepts them
+/// only from peers advertising the `need_p2p` exception.
+#[async_trait]
+pub trait UdpPunchInboundGate: Send + Sync {
+    async fn allow_inbound_punch(&self, caller_peer_id: Option<u64>) -> bool;
+}
+
+#[async_trait]
+impl<P> UdpPunchInboundGate for P
+where
+    P: UdpHolePunchPeerSource + Send + Sync + 'static,
+{
+    async fn allow_inbound_punch(&self, caller_peer_id: Option<u64>) -> bool {
+        if !self.p2p_policy_flags().disable_p2p {
+            return true;
+        }
+        let Some(caller_peer_id) =
+            caller_peer_id.and_then(|peer_id| crate::config::PeerId::try_from(peer_id).ok())
+        else {
+            return false;
+        };
+        let caller_need_p2p = self
+            .candidates()
+            .await
+            .into_iter()
+            .find(|candidate| candidate.peer_id == caller_peer_id)
+            .and_then(|candidate| candidate.feature_flag)
+            .is_some_and(|flag| flag.need_p2p);
+        crate::connectivity::hole_punch::policy::should_accept_inbound_punch(true, caller_need_p2p)
+    }
+}
+
+#[async_trait]
+pub trait UdpHolePunchRuntime: Send + Sync + 'static {
+    type Socket: VirtualUdpSocket + 'static;
+
+    fn socket_context(&self) -> SocketContext {
+        SocketContext::default()
+    }
+
+    async fn bind_udp(&self, options: UdpBindOptions) -> anyhow::Result<Arc<Self::Socket>>;
+
+    async fn bind_direct_connect_udp(&self) -> anyhow::Result<Arc<Self::Socket>> {
+        UdpHolePunchRuntime::bind_udp(
+            self,
+            UdpBindOptions::direct_connect().with_context(
+                self.socket_context()
+                    .with_ip_version(crate::socket::IpVersion::V4),
+            ),
+        )
+        .await
+    }
+
+    async fn resolve_udp_public_addr(
+        &self,
+        socket: Arc<Self::Socket>,
+    ) -> anyhow::Result<UdpResolvedPublicAddr>;
+
+    async fn create_listener(
+        &self,
+        prefer_port_mapping: bool,
+        scheme: UdpPunchScheme,
+    ) -> anyhow::Result<UdpPunchListener<Self::Socket>>;
+
+    async fn create_port_bound_listener(
+        &self,
+        port: u16,
+        scheme: UdpPunchScheme,
+    ) -> anyhow::Result<UdpPunchListener<Self::Socket>>;
+
+    async fn connect_with_socket(
+        &self,
+        socket: Arc<Self::Socket>,
+        remote: SocketAddr,
+        scheme: UdpPunchScheme,
+    ) -> anyhow::Result<UdpPunchSocket>;
+}
+
+#[async_trait]
+impl<T> VirtualUdpSocketFactory for T
+where
+    T: UdpHolePunchRuntime + Send + Sync + 'static,
+{
+    type Socket = T::Socket;
+
+    async fn bind_udp(&self, options: UdpBindOptions) -> anyhow::Result<Arc<Self::Socket>> {
+        UdpHolePunchRuntime::bind_udp(self, options).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
+
+    use super::*;
+    use crate::{connectivity::hole_punch::udp::UdpPunchCandidate, socket::udp::UdpSessionKind};
+
+    struct GatePeerSource {
+        disable_p2p: bool,
+        candidates: Vec<UdpPunchCandidate>,
+    }
+
+    #[async_trait::async_trait]
+    impl UdpHolePunchPeerSource for GatePeerSource {
+        fn local_peer_id(&self) -> crate::config::PeerId {
+            1
+        }
+
+        fn p2p_policy_flags(&self) -> P2pPolicyFlags {
+            P2pPolicyFlags {
+                disable_p2p: self.disable_p2p,
+                ..Default::default()
+            }
+        }
+
+        async fn candidates(&self) -> Vec<UdpPunchCandidate> {
+            self.candidates.clone()
+        }
+
+        fn p2p_demand_notify(&self) -> Arc<ExternalTaskSignal> {
+            Arc::new(ExternalTaskSignal::new())
+        }
+
+        fn is_local_virtual_ip(&self, _ip: &IpAddr) -> bool {
+            false
+        }
+
+        async fn is_easytier_managed_ipv6(&self, _ip: &Ipv6Addr) -> bool {
+            false
+        }
+    }
+
+    fn gate_candidate(peer_id: crate::config::PeerId, need_p2p: bool) -> UdpPunchCandidate {
+        UdpPunchCandidate {
+            peer_id,
+            udp_nat_type: crate::proto::common::NatType::Unknown,
+            feature_flag: Some(crate::proto::common::PeerFeatureFlag {
+                need_p2p,
+                ..Default::default()
+            }),
+            has_direct_connection: false,
+            udp_satisfied: false,
+            http3_satisfied: false,
+            has_recent_traffic: false,
+            peer_disguise_flags: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_gate_accepts_everything_without_local_disable() {
+        let source = GatePeerSource {
+            disable_p2p: false,
+            candidates: vec![],
+        };
+        assert!(source.allow_inbound_punch(Some(7)).await);
+        assert!(source.allow_inbound_punch(None).await);
+    }
+
+    #[tokio::test]
+    async fn inbound_gate_rejects_disabled_node_except_need_p2p_callers() {
+        let source = GatePeerSource {
+            disable_p2p: true,
+            candidates: vec![gate_candidate(7, false), gate_candidate(8, true)],
+        };
+        // Ordinary peers and unknown callers are rejected.
+        assert!(!source.allow_inbound_punch(Some(7)).await);
+        assert!(!source.allow_inbound_punch(Some(9)).await);
+        assert!(!source.allow_inbound_punch(None).await);
+        // The need_p2p exception still passes.
+        assert!(source.allow_inbound_punch(Some(8)).await);
+    }
+
+    struct MockSocket {
+        local_addr: SocketAddr,
+    }
+
+    #[async_trait]
+    impl VirtualUdpSocket for MockSocket {
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(self.local_addr)
+        }
+
+        async fn send_to(&self, data: &[u8], _addr: SocketAddr) -> io::Result<usize> {
+            Ok(data.len())
+        }
+
+        async fn recv_from(&self, _buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+            std::future::pending().await
+        }
+    }
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[derive(Default)]
+    struct MockProtocol {
+        upgrades: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ClientProtocolUpgrader<()> for MockProtocol {
+        fn supports_scheme(&self, scheme: &str) -> bool {
+            scheme == "udp"
+        }
+
+        async fn upgrade_client(
+            &self,
+            connected: ConnectedTransport<()>,
+            requested_url: url::Url,
+        ) -> anyhow::Result<Box<dyn Tunnel>> {
+            self.upgrades.fetch_add(1, Ordering::Relaxed);
+            let ConnectedTransport::Udp(connected) = connected else {
+                anyhow::bail!("expected UDP transport");
+            };
+            Ok(crate::connectivity::protocol::raw::upgrade_connected_udp(
+                connected,
+                requested_url,
+            )?)
+        }
+    }
+
+    #[derive(Default)]
+    struct MockTunnelSink {
+        clients: AtomicUsize,
+        servers: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl HolePunchTunnelSink for MockTunnelSink {
+        async fn add_client_tunnel(
+            &self,
+            _tunnel: Box<dyn Tunnel>,
+            origin: PeerConnectionOrigin,
+        ) -> anyhow::Result<()> {
+            assert_eq!(origin, PeerConnectionOrigin::UdpHolePunch);
+            self.clients.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn add_server_tunnel(
+            &self,
+            _tunnel: Box<dyn Tunnel>,
+            origin: PeerConnectionOrigin,
+        ) -> anyhow::Result<()> {
+            assert_eq!(origin, PeerConnectionOrigin::UdpHolePunch);
+            self.servers.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn punched_socket(local_port: u16, remote_port: u16) -> UdpPunchSocket {
+        let remote_addr = SocketAddr::from(([203, 0, 113, 1], remote_port));
+        let session = UdpSession::identity_standalone(
+            Arc::new(MockSocket {
+                local_addr: SocketAddr::from(([127, 0, 0, 1], local_port)),
+            }),
+            remote_addr,
+            UdpSessionKind::EasyTierMux,
+        )
+        .unwrap();
+        UdpPunchSocket::new(session, remote_addr, ())
+    }
+
+    #[tokio::test]
+    async fn protocol_sink_upgrades_before_role_specific_admission() {
+        let protocol = Arc::new(MockProtocol::default());
+        let tunnel_sink = Arc::new(MockTunnelSink::default());
+        let sink =
+            ProtocolUdpHolePunchTransportSink::<(), _>::new(protocol.clone(), tunnel_sink.clone());
+
+        let (client, client_url) = punched_socket(1000, 2000).into_connected();
+        sink.add_client_transport(client, client_url).await.unwrap();
+        let (server, server_url) = punched_socket(1001, 2001).into_connected();
+        sink.add_server_transport(server, server_url).await.unwrap();
+
+        assert_eq!(protocol.upgrades.load(Ordering::Relaxed), 2);
+        assert_eq!(tunnel_sink.clients.load(Ordering::Relaxed), 1);
+        assert_eq!(tunnel_sink.servers.load(Ordering::Relaxed), 1);
+    }
+
+    struct MockHttp3Acceptor(Option<Box<dyn Tunnel>>);
+
+    #[async_trait]
+    impl crate::connectivity::protocol::ServerTunnelAcceptor for MockHttp3Acceptor {
+        async fn accept(&mut self) -> anyhow::Result<Box<dyn Tunnel>> {
+            Ok(self.0.take().unwrap())
+        }
+    }
+
+    struct MockHttp3ServerProtocol {
+        use_acceptor: bool,
+        upgrades: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ServerProtocolUpgrader<()> for MockHttp3ServerProtocol {
+        fn supports_scheme(&self, scheme: &str) -> bool {
+            scheme == "http3"
+        }
+
+        async fn upgrade_tcp(
+            &self,
+            _socket: (),
+            _local_url: Url,
+        ) -> anyhow::Result<crate::connectivity::protocol::ServerProtocolUpgrade> {
+            anyhow::bail!("HTTP3 server must use UDP");
+        }
+
+        async fn upgrade_udp(
+            &self,
+            session: UdpSession,
+            local_url: Url,
+            admission: Option<crate::connectivity::protocol::ServerProtocolAdmission>,
+        ) -> anyhow::Result<crate::connectivity::protocol::ServerProtocolUpgrade> {
+            use crate::connectivity::protocol::ServerProtocolUpgrade;
+
+            assert_eq!(session.kind(), UdpSessionKind::Quic);
+            assert_eq!(local_url.as_str(), "http3://127.0.0.1:1000");
+            assert!(admission.is_some());
+            self.upgrades.fetch_add(1, Ordering::Relaxed);
+            let (tunnel, _remote) = crate::tunnel::ring::create_ring_tunnel_pair();
+            Ok(if self.use_acceptor {
+                ServerProtocolUpgrade::Acceptor(Box::new(MockHttp3Acceptor(Some(tunnel))))
+            } else {
+                ServerProtocolUpgrade::Tunnel(tunnel)
+            })
+        }
+
+        async fn upgrade_byte_stream(
+            &self,
+            _socket: (),
+            _local_url: Url,
+            _remote_url: Option<Url>,
+        ) -> anyhow::Result<crate::connectivity::protocol::ServerProtocolUpgrade> {
+            anyhow::bail!("HTTP3 server must use UDP");
+        }
+    }
+
+    #[tokio::test]
+    async fn http3_server_upgrade_preserves_udp_hole_punch_origin_for_both_admission_paths() {
+        for use_acceptor in [false, true] {
+            let client_protocol = Arc::new(MockProtocol::default());
+            let server_protocol = Arc::new(MockHttp3ServerProtocol {
+                use_acceptor,
+                upgrades: AtomicUsize::new(0),
+            });
+            let tunnel_sink = Arc::new(MockTunnelSink::default());
+            let sink = ProtocolUdpHolePunchTransportSink::<(), _>::with_http3_server(
+                client_protocol.clone(),
+                server_protocol.clone(),
+                tunnel_sink.clone(),
+            );
+            let remote_addr = "203.0.113.1:2000".parse().unwrap();
+            let session = UdpSession::identity_standalone(
+                Arc::new(MockSocket {
+                    local_addr: "127.0.0.1:1000".parse().unwrap(),
+                }),
+                remote_addr,
+                UdpSessionKind::Quic,
+            )
+            .unwrap();
+            let (connected, url) =
+                UdpPunchSocket::new_with_scheme(session, remote_addr, (), "http3").into_connected();
+
+            sink.add_server_transport(connected, url).await.unwrap();
+
+            // MockTunnelSink asserts the official origin at actual admission.
+            assert_eq!(server_protocol.upgrades.load(Ordering::Relaxed), 1);
+            assert_eq!(client_protocol.upgrades.load(Ordering::Relaxed), 0);
+            assert_eq!(tunnel_sink.servers.load(Ordering::Relaxed), 1);
+            assert_eq!(tunnel_sink.clients.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn punched_socket_preserves_requested_and_resolved_addresses() {
+        let local_addr = SocketAddr::from(([127, 0, 0, 1], 1000));
+        let requested_remote_addr = SocketAddr::from(([198, 51, 100, 1], 2000));
+        let resolved_remote_addr = SocketAddr::from(([203, 0, 113, 1], 3000));
+        let session = UdpSession::identity_standalone(
+            Arc::new(MockSocket { local_addr }),
+            resolved_remote_addr,
+            UdpSessionKind::EasyTierMux,
+        )
+        .unwrap();
+        let guard_dropped = Arc::new(AtomicBool::new(false));
+        let socket = UdpPunchSocket::new(
+            session,
+            requested_remote_addr,
+            DropSignal(guard_dropped.clone()),
+        );
+
+        let (connected, requested_url) = socket.into_connected();
+        let tunnel =
+            crate::connectivity::protocol::raw::upgrade_connected_udp(connected, requested_url)
+                .unwrap();
+        let info = tunnel.info().unwrap();
+        let local_url: url::Url = info.local_addr.unwrap().into();
+        let remote_url: url::Url = info.remote_addr.unwrap().into();
+        let resolved_url: url::Url = info.resolved_remote_addr.unwrap().into();
+
+        assert_eq!(local_url.host_str(), Some("127.0.0.1"));
+        assert_eq!(local_url.port(), Some(local_addr.port()));
+        assert_eq!(remote_url.host_str(), Some("198.51.100.1"));
+        assert_eq!(remote_url.port(), Some(requested_remote_addr.port()));
+        assert_eq!(resolved_url.host_str(), Some("203.0.113.1"));
+        assert_eq!(resolved_url.port(), Some(resolved_remote_addr.port()));
+        assert!(!guard_dropped.load(Ordering::Relaxed));
+        drop(tunnel);
+        assert!(guard_dropped.load(Ordering::Relaxed));
+    }
+}

@@ -1,0 +1,281 @@
+use std::sync::Arc;
+
+use anyhow::{Context as _, Result};
+use async_trait::async_trait;
+use easytier_core::{
+    config::toml::ConfigLoader as _,
+    connectivity::{manual::ManualTunnelConnector, protocol::raw::TunnelDialer},
+    management::{ConfigServerEndpoint, InstanceStateStore, WebClientConfig},
+    socket::IpVersion,
+    tunnel::Tunnel,
+};
+use url::Url;
+
+#[cfg(feature = "management")]
+use crate::{
+    common::os_info::collect_device_os_info, instance::config_storage::NativeConfigFileStorage,
+    rpc_service::logger::NativeLoggerControl,
+};
+use crate::{
+    common::{
+        MachineIdOptions, config::TomlConfigLoader, constants::EASYTIER_VERSION,
+        global_ctx::GlobalCtx, resolve_machine_id,
+    },
+    instance::{
+        composition::runtime_one_shot_manual_connector,
+        factory::{NativeInstanceFactory, NativeInstanceManager},
+        host::NativeInstanceHost,
+    },
+    tunnel::TunnelScheme,
+};
+
+pub use easytier_core::management::InstanceMutationHooks as WebClientHooks;
+
+pub struct WebClient {
+    inner: easytier_core::management::WebClient<NativeInstanceFactory>,
+}
+
+pub struct WebClientOptions {
+    pub token: String,
+    pub machine_id: uuid::Uuid,
+    pub hostname: String,
+    pub secure_mode: bool,
+}
+
+impl WebClient {
+    pub fn new<T>(
+        connector: T,
+        options: WebClientOptions,
+        manager: Arc<NativeInstanceManager>,
+        hooks: Option<Arc<dyn WebClientHooks>>,
+        state_store: Arc<InstanceStateStore>,
+    ) -> Self
+    where
+        T: TunnelDialer + 'static,
+    {
+        Self::new_with_load_options(connector, options, manager, hooks, state_store, false)
+    }
+
+    pub fn new_with_load_options<T>(
+        connector: T,
+        options: WebClientOptions,
+        manager: Arc<NativeInstanceManager>,
+        hooks: Option<Arc<dyn WebClientHooks>>,
+        state_store: Arc<InstanceStateStore>,
+        disable_env_parsing: bool,
+    ) -> Self
+    where
+        T: TunnelDialer + 'static,
+    {
+        #[cfg(not(feature = "management"))]
+        let _ = disable_env_parsing;
+        let config = WebClientConfig {
+            token: options.token,
+            machine_id: options.machine_id,
+            hostname: options.hostname,
+            device_os: web_client_device_os_info(),
+            easytier_version: EASYTIER_VERSION.to_owned(),
+            secure_mode: options.secure_mode,
+            support_local_configs: manager.config_dir().is_some(),
+        };
+        #[cfg(feature = "management")]
+        let inner = easytier_core::management::WebClient::new(
+            connector,
+            config,
+            manager,
+            hooks.unwrap_or_else(|| Arc::new(DefaultHooks)),
+            Arc::new(NativeConfigFileStorage::new(disable_env_parsing)),
+            state_store,
+            Arc::new(NativeLoggerControl),
+        );
+        #[cfg(not(feature = "management"))]
+        let inner = easytier_core::management::WebClient::new(
+            connector,
+            config,
+            manager,
+            hooks.unwrap_or_else(|| Arc::new(DefaultHooks)),
+            Arc::new(easytier_core::management::UnsupportedConfigFileStorage),
+            state_store,
+        );
+        Self { inner }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.inner.is_connected()
+    }
+
+    pub async fn shutdown(self) {
+        self.inner.shutdown().await;
+    }
+}
+
+#[cfg(feature = "management")]
+fn web_client_device_os_info() -> easytier_proto::web::DeviceOsInfo {
+    collect_device_os_info()
+}
+
+#[cfg(not(feature = "management"))]
+fn web_client_device_os_info() -> easytier_proto::web::DeviceOsInfo {
+    easytier_proto::web::DeviceOsInfo {
+        os_type: std::env::consts::OS.to_owned(),
+        version: String::new(),
+        distribution: String::new(),
+    }
+}
+
+pub struct DefaultHooks;
+
+#[async_trait]
+impl WebClientHooks for DefaultHooks {}
+
+struct ConfigServerConnector {
+    url: Url,
+    connector: ManualTunnelConnector<NativeInstanceHost>,
+}
+
+#[async_trait]
+impl TunnelDialer for ConfigServerConnector {
+    async fn connect(&self) -> anyhow::Result<Box<dyn Tunnel>> {
+        self.connector
+            .connect(self.url.clone(), IpVersion::Both)
+            .await
+    }
+
+    fn remote_url(&self) -> Url {
+        self.url.clone()
+    }
+}
+
+pub fn parse_config_server_endpoint(input: &str) -> anyhow::Result<ConfigServerEndpoint> {
+    ConfigServerEndpoint::parse(input, |url| TunnelScheme::try_from(url).is_ok())
+}
+
+pub async fn run_web_client(
+    config_server_url: &str,
+    machine_id_options: MachineIdOptions,
+    hostname: Option<String>,
+    secure_mode: bool,
+    manager: Arc<NativeInstanceManager>,
+    hooks: Option<Arc<dyn WebClientHooks>>,
+    state_store: Arc<InstanceStateStore>,
+) -> Result<WebClient> {
+    run_web_client_with_load_options(
+        config_server_url,
+        machine_id_options,
+        hostname,
+        secure_mode,
+        manager,
+        hooks,
+        state_store,
+        false,
+    )
+    .await
+}
+
+// Preserve the existing wrapper's arguments while forwarding the CLI loader policy.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_web_client_with_load_options(
+    config_server_url: &str,
+    machine_id_options: MachineIdOptions,
+    hostname: Option<String>,
+    secure_mode: bool,
+    manager: Arc<NativeInstanceManager>,
+    hooks: Option<Arc<dyn WebClientHooks>>,
+    state_store: Arc<InstanceStateStore>,
+    disable_env_parsing: bool,
+) -> Result<WebClient> {
+    let machine_id = resolve_machine_id(&machine_id_options)
+        .with_context(|| "failed to resolve machine id for web client")?;
+    let endpoint = parse_config_server_endpoint(config_server_url)?;
+
+    let config = TomlConfigLoader::default();
+    let global_ctx = Arc::new(GlobalCtx::new(config.clone()));
+    let mut flags = global_ctx.get_flags();
+    flags.bind_device = false;
+    config.set_flags(flags.clone());
+    global_ctx.set_flags(flags);
+    let hostname =
+        hostname.unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
+    let connector =
+        runtime_one_shot_manual_connector(global_ctx, &config, manager.process_runtime())?;
+
+    Ok(WebClient::new_with_load_options(
+        ConfigServerConnector {
+            url: endpoint.connect_url().clone(),
+            connector,
+        },
+        WebClientOptions {
+            token: endpoint.token().to_owned(),
+            machine_id,
+            hostname,
+            secure_mode,
+        },
+        manager,
+        hooks,
+        state_store,
+        disable_env_parsing,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    use crate::{common::MachineIdOptions, instance::factory::native_instance_manager};
+
+    use super::InstanceStateStore;
+
+    #[tokio::test]
+    async fn test_manager_wait() {
+        let manager = Arc::new(native_instance_manager());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client = super::run_web_client(
+            format!("ring://{}/test", uuid::Uuid::new_v4()).as_str(),
+            MachineIdOptions {
+                explicit_machine_id: None,
+                state_dir: Some(temp_dir.path().to_path_buf()),
+            },
+            None,
+            false,
+            manager.clone(),
+            None,
+            Arc::new(InstanceStateStore::in_memory()),
+        )
+        .await
+        .unwrap();
+        let sleep_finish = Arc::new(AtomicBool::new(false));
+        let sleep_finish_clone = sleep_finish.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            sleep_finish_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            drop(client);
+        });
+
+        manager.wait().await;
+        assert!(sleep_finish.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_run_web_client_with_unreachable_config_server() {
+        let manager = Arc::new(native_instance_manager());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client = super::run_web_client(
+            "udp://config-server.invalid:22020/test",
+            MachineIdOptions {
+                explicit_machine_id: None,
+                state_dir: Some(temp_dir.path().to_path_buf()),
+            },
+            None,
+            false,
+            manager,
+            None,
+            Arc::new(InstanceStateStore::in_memory()),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!client.is_connected());
+    }
+}

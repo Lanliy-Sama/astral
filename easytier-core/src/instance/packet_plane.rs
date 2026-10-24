@@ -1,0 +1,102 @@
+use std::{collections::BTreeSet, net::IpAddr, sync::Arc};
+
+use crate::{
+    config::runtime::CoreRuntimeConfigStore,
+    gateway::proxy::cidr_monitor::{ProxyCidrDiff, collect_proxy_cidr_diff},
+    host::packet::HostPacket,
+    peers::peer_manager::PeerManagerCore,
+};
+
+#[cfg(feature = "proxy-packet")]
+use crate::foundation::stats::{LabelSet, LabelType, MetricName};
+#[cfg(feature = "proxy-packet")]
+use crate::gateway::udp_broadcast::UdpBroadcastRelayStats;
+
+use super::packet_io::parse_ip_packet;
+
+/// Stable packet- and route-plane projection for platform integrations.
+pub struct CorePacketPlane {
+    peer_manager: Arc<PeerManagerCore>,
+    runtime_config: CoreRuntimeConfigStore,
+    proxy_cidr_monitor_available: bool,
+}
+
+impl CorePacketPlane {
+    pub async fn vpn_route_exclusions(&self) -> crate::config::vpn::routes::VpnRouteExclusions {
+        self.peer_manager.vpn_route_exclusions().await
+    }
+
+    pub async fn vpn_route_plan(&self) -> (crate::config::vpn::routes::VpnRoutePlan, u64) {
+        let engine = self.peer_manager.vpn_engine();
+        engine.update_exclusions(self.vpn_route_exclusions().await);
+        engine.route_plan()
+    }
+
+    pub(super) fn new(
+        peer_manager: Arc<PeerManagerCore>,
+        runtime_config: CoreRuntimeConfigStore,
+        proxy_cidr_monitor_available: bool,
+    ) -> Self {
+        Self {
+            peer_manager,
+            runtime_config,
+            proxy_cidr_monitor_available,
+        }
+    }
+
+    pub async fn send_ip_packet(&self, packet: HostPacket) -> anyhow::Result<()> {
+        let meta = parse_ip_packet(packet.payload())?;
+        let source_is_local = self.peer_manager.is_local_virtual_ip(&meta.source);
+        if matches!(meta.source, IpAddr::V6(ip) if ip.is_unicast_link_local()) && !source_is_local {
+            return Ok(());
+        }
+        self.peer_manager
+            .send_msg_by_ip(packet.into_core_packet(), meta.destination, source_is_local)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn send_local_ip_packet(&self, packet: HostPacket) -> anyhow::Result<()> {
+        let destination = parse_ip_packet(packet.payload())?.destination;
+        self.peer_manager
+            .send_msg_by_ip(packet.into_core_packet(), destination, true)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn proxy_cidr_diff(
+        &self,
+        previous: &BTreeSet<cidr::Ipv4Cidr>,
+    ) -> Option<ProxyCidrDiff> {
+        if !self.proxy_cidr_monitor_available {
+            return None;
+        }
+        Some(
+            collect_proxy_cidr_diff(self.peer_manager.as_ref(), &self.runtime_config, previous)
+                .await,
+        )
+    }
+
+    #[cfg(feature = "proxy-packet")]
+    pub fn udp_broadcast_relay_stats(&self) -> UdpBroadcastRelayStats {
+        let network_name = self
+            .runtime_config
+            .snapshot()
+            .peer
+            .runtime
+            .network_identity
+            .network_name
+            .clone();
+        let labels = LabelSet::new().with_label_type(LabelType::NetworkName(network_name));
+        let stats = self.peer_manager.stats_manager();
+        UdpBroadcastRelayStats::new(
+            stats.get_counter(MetricName::UdpBroadcastRelayPacketsCaptured, labels.clone()),
+            stats.get_counter(MetricName::UdpBroadcastRelayPacketsIgnored, labels.clone()),
+            stats.get_counter(
+                MetricName::UdpBroadcastRelayPacketsForwarded,
+                labels.clone(),
+            ),
+            stats.get_counter(MetricName::UdpBroadcastRelayPacketsForwardFailed, labels),
+        )
+    }
+}

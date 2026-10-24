@@ -1,0 +1,215 @@
+import { invoke } from '@tauri-apps/api/core'
+import { Api, NetworkTypes, LocalConfigs, Utils } from 'easytier-frontend-lib'
+import { type ConfigSource, normalizeConfigSource } from './config_source'
+import { readRemoteConfigs } from './remote_configs'
+
+type NetworkConfig = NetworkTypes.NetworkConfig
+type ValidateConfigResponse = Api.ValidateConfigResponse
+type ListNetworkInstanceIdResponse = Api.ListNetworkInstanceIdResponse
+interface ServiceOptions {
+  config_dir: string
+  rpc_portal: string
+  file_log_level: string
+  file_log_dir: string
+  config_server?: string
+}
+
+export type ServiceStatus = "Running" | "Stopped" | "NotInstalled"
+
+interface StoredGuiConfig {
+  config: NetworkConfig
+  source: ConfigSource
+}
+
+function parseStoredConfigs(raw: string | null): StoredGuiConfig[] {
+  const parsed: unknown = JSON.parse(raw || '[]')
+  if (!Array.isArray(parsed)) {
+    return []
+  }
+
+  return parsed.flatMap((entry): StoredGuiConfig[] => {
+    if (entry && typeof entry === 'object' && 'config' in entry) {
+      const { config, source } = entry as {
+        config?: NetworkConfig
+        source?: unknown
+      }
+      if (!config) {
+        return []
+      }
+      return [{
+        config: NetworkTypes.normalizeNetworkConfig(config),
+        source: normalizeConfigSource(source),
+      }]
+    }
+
+    return [{
+      config: NetworkTypes.normalizeNetworkConfig(entry as NetworkConfig),
+      source: 'legacy',
+    }]
+  })
+}
+
+export async function parseNetworkConfig(cfg: NetworkConfig, capabilities?: readonly string[]) {
+  return invoke<string>('parse_network_config', { cfg: NetworkTypes.toBackendNetworkConfig(cfg, capabilities) })
+}
+
+export async function generateNetworkConfig(tomlConfig: string) {
+  const config = await invoke<NetworkConfig>('generate_network_config', { tomlConfig })
+  return NetworkTypes.normalizeNetworkConfig(config)
+}
+
+export async function runNetworkInstance(cfg: NetworkConfig, save: boolean, capabilities?: readonly string[]) {
+  return invoke('run_network_instance', { cfg: NetworkTypes.toBackendNetworkConfig(cfg, capabilities), save })
+}
+
+export async function collectNetworkInfo(instanceId: string) {
+  return await invoke<Api.CollectNetworkInfoResponse>('collect_network_info', { instanceId })
+}
+
+export async function getVpnPortalInfo(instanceId: string) {
+  const info = await invoke<NetworkTypes.VpnPortalInfo | undefined>('get_vpn_portal_info', { instanceId })
+  return info ? NetworkTypes.normalizeVpnPortalInfo(info) : undefined
+}
+
+export async function getVpnStatus(instanceId: string) {
+  const status = await invoke<NetworkTypes.GetVpnStatusResponse | undefined>('get_vpn_status', { instanceId })
+  return status ? NetworkTypes.normalizeVpnStatus(status) : undefined
+}
+
+export async function addVpnPortalClient(instanceId: string, client: { name: string, virtual_ip: string, groups: string[] }) {
+  return invoke('patch_vpn_portal_clients', { instanceId, action: 'add', name: client.name, virtualIp: client.virtual_ip, groups: client.groups })
+}
+
+export async function removeVpnPortalClient(instanceId: string, name: string) {
+  return invoke('patch_vpn_portal_clients', { instanceId, action: 'remove', name })
+}
+
+export async function clearVpnPortalClients(instanceId: string) {
+  return invoke('patch_vpn_portal_clients', { instanceId, action: 'clear' })
+}
+
+export async function setLoggingLevel(level: string) {
+  return await invoke('set_logging_level', { level })
+}
+
+export interface MobileTunConfig {
+  instance_ids: string[]
+  addresses: string[]
+  routes: string[]
+  dns?: string | null
+  rejected: { instance_id: string, error: string }[]
+}
+
+export async function setTunFd(fd: number, instanceIds?: string[], generation?: string) {
+  return invoke<MobileTunConfig>('set_tun_fd', { fd, instanceIds, generation })
+}
+
+export async function getMobileTunConfig(instanceIds: string[]) {
+  return invoke<MobileTunConfig>('get_mobile_tun_config', { instanceIds })
+}
+
+export async function getEasytierVersion() {
+  return await invoke<string>('easytier_version')
+}
+
+export async function listNetworkInstanceIds() {
+  return await invoke<ListNetworkInstanceIdResponse>('list_network_instance_ids')
+}
+
+export async function deleteNetworkInstance(instanceId: string, expectedRevision?: string) {
+  return await invoke('remove_network_instance', { instanceId, expectedRevision })
+}
+
+export async function updateNetworkConfigState(instanceId: string, disabled: boolean, expectedRevision?: string) {
+  return await invoke('update_network_config_state', { instanceId, disabled, expectedRevision })
+}
+
+export async function saveNetworkConfig(cfg: NetworkConfig, capabilities?: readonly string[]) {
+  return await invoke('save_network_config', { cfg: NetworkTypes.toBackendNetworkConfig(cfg, capabilities) })
+}
+
+export async function validateConfig(cfg: NetworkConfig, capabilities?: readonly string[]) {
+  return await invoke<ValidateConfigResponse>('validate_config', { cfg: NetworkTypes.toBackendNetworkConfig(cfg, capabilities) })
+}
+
+export async function observeLocalConfigs() {
+  return invoke<Omit<LocalConfigs.LocalConfigSnapshot, 'online' | 'capabilities'>>('observe_local_configs')
+}
+
+export async function patchLocalConfig(request: LocalConfigs.LocalConfigPatchRequest) {
+  return invoke<LocalConfigs.LocalConfigPatchResult>('patch_local_config', { request: { ...request, inst_id: Utils.StrToUuid(request.inst_id) } })
+}
+
+export async function getConfig(instanceId: string, normalize = true) {
+  const config = await invoke<NetworkConfig>('get_config', { instanceId })
+  return normalize ? NetworkTypes.normalizeNetworkConfig(config) : config
+}
+
+export async function sendConfigs(enabledNetworks: string[], migrationKey?: string) {
+  const networkList = migrationKey && !localStorage.getItem(migrationKey)
+    ? parseStoredConfigs(localStorage.getItem('networkList')) : []
+  await invoke('load_configs', {
+    configs: networkList.map(({ config, source }) => ({
+      config: NetworkTypes.toBackendNetworkConfig(config),
+      source,
+    })),
+    enabledNetworks
+  })
+  if (migrationKey) localStorage.setItem(migrationKey, '1')
+}
+
+/** Rebuild the GUI-only cache from the active core without replaying old state. */
+export async function syncConfigsFromCore(remoteRpcUrl?: string) {
+  const configs = remoteRpcUrl ? parseStoredConfigs(readRemoteConfigs(remoteRpcUrl)) : []
+  return invoke('load_configs', {
+    configs: configs.map(({ config, source }) => ({ config: NetworkTypes.toBackendNetworkConfig(config), source })),
+    enabledNetworks: [],
+  })
+}
+
+export async function getNetworkMetas(instanceIds: string[]) {
+  return await invoke<Api.GetNetworkMetasResponse>('get_network_metas', { instanceIds })
+}
+
+export async function initService(opts?: ServiceOptions) {
+  return await invoke('init_service', { opts })
+}
+
+export async function setServiceStatus(enable: boolean, rpcPortal?: string) {
+  return await invoke('set_service_status', { enable, rpcPortal })
+}
+
+export interface RetiredService {
+  name: string
+  /** "disabled" (reversible), "uninstalled" (irreversible), or "failed" */
+  action: 'disabled' | 'uninstalled' | 'failed' | string
+  error?: string
+}
+
+export async function retireConflictingServices(configDir: string, rpcPortal?: string, allowUninstall = false) {
+  return await invoke<RetiredService[]>('retire_conflicting_services', { configDir, rpcPortal, allowUninstall })
+}
+
+export async function getServiceStatus() {
+  return await invoke<ServiceStatus>('get_service_status')
+}
+
+export async function resolveSharedConfigDir(configDir?: string) {
+  return await invoke<string>('resolve_shared_config_dir', { configDir })
+}
+
+export async function initRpcConnection(isNormalMode: boolean, url?: string, configDir?: string, remoteConfigCache = false) {
+  return await invoke('init_rpc_connection', { isNormalMode, url, configDir, remoteConfigCache })
+}
+
+export async function isClientRunning() {
+  return await invoke<boolean>('is_client_running')
+}
+
+export async function initWebClient(url?: string) {
+  return await invoke('init_web_client', { url })
+}
+
+export async function isWebClientConnected() {
+  return await invoke<boolean>('is_web_client_connected')
+}
