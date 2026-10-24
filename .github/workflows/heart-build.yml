@@ -45,11 +45,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Checkout EasyTier-Custom kernel
+      - name: Checkout kernel branch (EC + Heart tuning)
         uses: actions/checkout@v4
         with:
-          repository: 225284228a-droid/EasyTier-Custom
-          ref: main
+          ref: Easytier-Heart
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'

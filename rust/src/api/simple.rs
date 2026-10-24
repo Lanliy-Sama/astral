@@ -535,6 +535,9 @@ pub fn create_server(
         // Set network identity
         cfg.set_network_identity(NetworkIdentity::new(room_name, room_password));
 
+        // EC 内核 parallel_connections：对同一对端并行维持多条连接（高丢包链路的核心抗性手段），强制 16（内核上限）
+        cfg.set_parallel_connections(Some(16));
+
         // 直接启动网络实例，无需嵌套 spawn
         create_and_store_network_instance(cfg).await
     })
