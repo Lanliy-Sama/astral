@@ -25,8 +25,15 @@ jobs:
         run: |
           command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . "$HOME/.cargo/env")
           cd rust
-          cargo update -p easytier
+          cargo update
           cd ..
+
+      - name: Cargo check (surface kernel compile errors)
+        run: |
+          command -v cargo >/dev/null 2>&1 || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . "$HOME/.cargo/env")
+          cd rust
+          set -o pipefail
+          cargo check 2>&1 | tail -n 250
 
       - name: Check for changes
         id: changes
