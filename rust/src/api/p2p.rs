@@ -329,7 +329,6 @@ pub fn create_server_with_flags(
         flags.enable_ipv6 = flag.enable_ipv6;
         flags.mtu = flag.mtu;
         flags.latency_first = flag.latency_first;
-        flags.enable_exit_node = flag.enable_exit_node;
         flags.no_tun = flag.no_tun;
         flags.use_smoltcp = flag.use_smoltcp;
         flags.relay_network_whitelist = flag.relay_network_whitelist;
@@ -345,7 +344,6 @@ pub fn create_server_with_flags(
         flags.disable_kcp_input = flag.disable_kcp_input;
         flags.disable_relay_kcp = flag.disable_relay_kcp;
         flags.proxy_forward_by_system = flag.proxy_forward_by_system;
-        flags.accept_dns = flag.accept_dns;
         flags.private_mode = flag.private_mode;
         flags.enable_quic_proxy = flag.enable_quic_proxy;
         flags.disable_quic_input = flag.disable_quic_input;
@@ -454,8 +452,6 @@ pub async fn get_peer_route_pairs(instance_id: String) -> Result<Vec<PeerRoutePa
             next_hop_peer_id_latency_first: None,
             cost_latency_first: None,
             path_latency_latency_first: None,
-            public_ipv6_addr: None,
-            ipv6_public_addr_prefix: None,
         };
 
         let my_peer_info = info.peers.iter().find(|p| p.peer_id == my_peer_id).cloned();

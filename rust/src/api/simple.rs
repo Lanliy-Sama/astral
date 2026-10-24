@@ -29,9 +29,8 @@ lazy_static! {
     static ref MANAGER: NativeInstanceManager = native_instance_manager();
     static ref CURRENT_ID: Arc<RwLock<Option<Uuid>>> = Arc::new(RwLock::new(None));
 }
-// 创建一个 NetworkInstance 类型变量 储存当前服务器
-lazy_static! {
-    static ref RT: Runtime = Runtime::new().expect("创建 Tokio 运行时失败");
+// 鍒涘缓涓€涓?NetworkInstance 绫诲瀷鍙橀噺 鍌ㄥ瓨褰撳墠鏈嶅姟鍣?lazy_static! {
+    static ref RT: Runtime = Runtime::new().expect("鍒涘缓 Tokio 杩愯鏃跺け璐?);
 }
 
 fn peer_conn_info_to_string(p: proto::api::instance::PeerConnInfo) -> String {
@@ -46,12 +45,12 @@ pub fn send_udp_to_localhost(message: &str) -> Result<(), String> {
 
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
-        Err(e) => return Err(format!("绑定UDP套接字失败: {}", e)),
+        Err(e) => return Err(format!("缁戝畾UDP濂楁帴瀛楀け璐? {}", e)),
     };
 
     match socket.send_to(message.as_bytes(), "127.0.0.1:9999") {
         Ok(_) => Ok(()),
-        Err(e) => Err(format!("发送UDP数据失败: {}", e)),
+        Err(e) => Err(format!("鍙戦€乁DP鏁版嵁澶辫触: {}", e)),
     }
 }
 
@@ -63,34 +62,34 @@ pub fn handle_event(mut events: EventBusSubscriber) -> tokio::task::JoinHandle<(
                     //  println!("Received event: {:?}", e);
                     match e {
                         GlobalCtxEvent::PeerAdded(p) => {
-                            println!("{}", format!("新节点已添加。节点ID: {}", p));
-                            let _ = send_udp_to_localhost(&format!("新节点已添加。节点ID: {}", p));
+                            println!("{}", format!("鏂拌妭鐐瑰凡娣诲姞銆傝妭鐐笽D: {}", p));
+                            let _ = send_udp_to_localhost(&format!("鏂拌妭鐐瑰凡娣诲姞銆傝妭鐐笽D: {}", p));
                         }
                         GlobalCtxEvent::PeerRemoved(p) => {
-                            println!("{}", format!("节点已移除。节点ID: {}", p));
-                            let _ = send_udp_to_localhost(&format!("节点已移除。节点ID: {}", p));
+                            println!("{}", format!("鑺傜偣宸茬Щ闄ゃ€傝妭鐐笽D: {}", p));
+                            let _ = send_udp_to_localhost(&format!("鑺傜偣宸茬Щ闄ゃ€傝妭鐐笽D: {}", p));
                         }
                         GlobalCtxEvent::PeerConnAdded(p) => {
                             let conn_info = peer_conn_info_to_string(p);
-                            let msg = format!("新节点连接已添加。连接信息: {}", conn_info);
+                            let msg = format!("鏂拌妭鐐硅繛鎺ュ凡娣诲姞銆傝繛鎺ヤ俊鎭? {}", conn_info);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::PeerConnRemoved(p) => {
                             let msg = format!(
-                                "节点连接已移除。连接信息: {}",
+                                "鑺傜偣杩炴帴宸茬Щ闄ゃ€傝繛鎺ヤ俊鎭? {}",
                                 peer_conn_info_to_string(p)
                             );
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::ListenerAddFailed(p, msg) => {
-                            let msg = format!("监听器添加失败。监听器: {}, 消息: {}", p, msg);
+                            let msg = format!("鐩戝惉鍣ㄦ坊鍔犲け璐ャ€傜洃鍚櫒: {}, 娑堟伅: {}", p, msg);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::ListenerAcceptFailed(p, msg) => {
-                            let msg = format!("监听器接受失败。监听器: {}, 消息: {}", p, msg);
+                            let msg = format!("鐩戝惉鍣ㄦ帴鍙楀け璐ャ€傜洃鍚櫒: {}, 娑堟伅: {}", p, msg);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
@@ -98,54 +97,54 @@ pub fn handle_event(mut events: EventBusSubscriber) -> tokio::task::JoinHandle<(
                             if p.scheme() == "ring" {
                                 continue;
                             }
-                            let msg = format!("新监听器已添加。监听器: {}", p);
+                            let msg = format!("鏂扮洃鍚櫒宸叉坊鍔犮€傜洃鍚櫒: {}", p);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::ConnectionAccepted(local, remote) => {
-                            let msg = format!("新连接已接受。本地: {}, 远程: {}", local, remote);
+                            let msg = format!("鏂拌繛鎺ュ凡鎺ュ彈銆傛湰鍦? {}, 杩滅▼: {}", local, remote);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::ConnectionError(local, remote, err) => {
                             let msg = format!(
-                                "连接错误。本地: {}, 远程: {}, 错误: {}",
+                                "杩炴帴閿欒銆傛湰鍦? {}, 杩滅▼: {}, 閿欒: {}",
                                 local, remote, err
                             );
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::TunDeviceReady(dev) => {
-                            let msg = format!("TUN 设备就绪。设备: {}", dev);
+                            let msg = format!("TUN 璁惧灏辩华銆傝澶? {}", dev);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::TunDeviceError(err) => {
-                            let msg = format!("TUN 设备错误。错误: {}", err);
+                            let msg = format!("TUN 璁惧閿欒銆傞敊璇? {}", err);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::Connecting(dst) => {
-                            let msg = format!("正在连接到节点。目标: {}", dst);
+                            let msg = format!("姝ｅ湪杩炴帴鍒拌妭鐐广€傜洰鏍? {}", dst);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::ConnectError(dst, ip_version, err) => {
                             let msg = format!(
-                                "连接到节点错误。目标: {}, IP版本: {}, 错误: {}",
+                                "杩炴帴鍒拌妭鐐归敊璇€傜洰鏍? {}, IP鐗堟湰: {}, 閿欒: {}",
                                 dst, ip_version, err
                             );
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::VpnPortalStarted(portal) => {
-                            let msg = format!("VPN 门户已启动。门户: {}", portal);
+                            let msg = format!("VPN 闂ㄦ埛宸插惎鍔ㄣ€傞棬鎴? {}", portal);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::VpnPortalClientConnected(portal, client_addr) => {
                             let msg = format!(
-                                "VPN 门户客户端已连接。门户: {}, 客户端地址: {}",
+                                "VPN 闂ㄦ埛瀹㈡埛绔凡杩炴帴銆傞棬鎴? {}, 瀹㈡埛绔湴鍧€: {}",
                                 portal, client_addr
                             );
                             println!("{}", msg);
@@ -153,24 +152,24 @@ pub fn handle_event(mut events: EventBusSubscriber) -> tokio::task::JoinHandle<(
                         }
                         GlobalCtxEvent::VpnPortalClientDisconnected(portal, client_addr) => {
                             let msg = format!(
-                                "VPN 门户客户端已断开连接。门户: {}, 客户端地址: {}",
+                                "VPN 闂ㄦ埛瀹㈡埛绔凡鏂紑杩炴帴銆傞棬鎴? {}, 瀹㈡埛绔湴鍧€: {}",
                                 portal, client_addr
                             );
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::DhcpIpv4Changed(old, new) => {
-                            let msg = format!("DHCP IP 已更改。旧: {:?}, 新: {:?}", old, new);
+                            let msg = format!("DHCP IP 宸叉洿鏀广€傛棫: {:?}, 鏂? {:?}", old, new);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::DhcpIpv4Conflicted(ip) => {
-                            let msg = format!("DHCP IP 冲突。IP: {:?}", ip);
+                            let msg = format!("DHCP IP 鍐茬獊銆侷P: {:?}", ip);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
                         GlobalCtxEvent::PortForwardAdded(port_forward_config_pb) => {
-                            let msg = format!("端口转发已添加。配置: {:?}", port_forward_config_pb);
+                            let msg = format!("绔彛杞彂宸叉坊鍔犮€傞厤缃? {:?}", port_forward_config_pb);
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                         }
@@ -180,17 +179,17 @@ pub fn handle_event(mut events: EventBusSubscriber) -> tokio::task::JoinHandle<(
                     }
                 }
                 Err(err) => {
-                    eprintln!("接收事件错误: {:?}", err);
-                    // 根据错误类型决定是否中断循环
+                    eprintln!("鎺ユ敹浜嬩欢閿欒: {:?}", err);
+                    // 鏍规嵁閿欒绫诲瀷鍐冲畾鏄惁涓柇寰幆
                     match err {
                         tokio::sync::broadcast::error::RecvError::Closed => {
-                            let msg = "事件通道已关闭，停止事件处理。";
+                            let msg = "浜嬩欢閫氶亾宸插叧闂紝鍋滄浜嬩欢澶勭悊銆?;
                             println!("{}", msg);
                             let _ = send_udp_to_localhost(msg);
                             break; // Exit the loop if the channel is closed
                         }
                         tokio::sync::broadcast::error::RecvError::Lagged(n) => {
-                            let msg = format!("事件处理滞后，丢失了 {} 个事件。", n);
+                            let msg = format!("浜嬩欢澶勭悊婊炲悗锛屼涪澶变簡 {} 涓簨浠躲€?, n);
                             eprintln!("{}", msg);
                             let _ = send_udp_to_localhost(&msg);
                             // Decide if lagging is critical enough to break or just log
@@ -205,77 +204,70 @@ pub fn handle_event(mut events: EventBusSubscriber) -> tokio::task::JoinHandle<(
 async fn create_and_store_network_instance(cfg: TomlConfigLoader) -> Result<(), String> {
     println!("{:?}", cfg);
 
-    // 在移动 cfg 之前先获取 ID
+    // 鍦ㄧЩ鍔?cfg 涔嬪墠鍏堣幏鍙?ID
     let name = cfg.get_id().to_string();
     let had_instance = {
         let mut instance_guard = CURRENT_ID.write().await;
         instance_guard.take().is_some()
     };
-    // 创建并启动网络实例
-    let instance_id = MANAGER
+    // 鍒涘缓骞跺惎鍔ㄧ綉缁滃疄渚?    let instance_id = MANAGER
         .run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)
         .map_err(|e| format!("start instance failed: {}", e))?;
-    // 订阅实例事件
+    // 璁㈤槄瀹炰緥浜嬩欢
     if let Some(instance) = MANAGER.instance(instance_id) {
         if let Some(events) = subscribe_native_instance_event(&instance) {
             handle_event(events);
         }
     }
     println!("instance {} started", name);
-    // 将实例 ID 存储到 CURRENT_ID 中
-    let mut instance_guard = CURRENT_ID.write().await;
+    // 灏嗗疄渚?ID 瀛樺偍鍒?CURRENT_ID 涓?    let mut instance_guard = CURRENT_ID.write().await;
     *instance_guard = Some(instance_id);
     if !had_instance {
-        println!("实例已成功储存");
+        println!("瀹炰緥宸叉垚鍔熷偍瀛?);
     } else {
-        println!("网络实例已存在");
+        println!("缃戠粶瀹炰緥宸插瓨鍦?);
     }
-    print!("成功储存");
+    print!("鎴愬姛鍌ㄥ瓨");
 
     Ok(())
 }
 
-// 返回EasyTier的版本号
+// 杩斿洖EasyTier鐨勭増鏈彿
 pub fn easytier_version() -> Result<String, String> {
     Ok(easytier::VERSION.to_string())
 }
 
-// 是否在运行
-pub async fn is_easytier_running() -> bool {
+// 鏄惁鍦ㄨ繍琛?pub async fn is_easytier_running() -> bool {
     let instance = CURRENT_ID.read().await;
     instance.is_some()
 }
-// 定义节点跳跃统计信息结构体
-pub struct NodeHopStats {
+// 瀹氫箟鑺傜偣璺宠穬缁熻淇℃伅缁撴瀯浣?pub struct NodeHopStats {
     pub peer_id: u32,
-    pub target_ip: String, // 目标节点IP
-    pub latency_ms: f64,   // 延迟(毫秒)
-    pub packet_loss: f32,  // 丢包率
-    pub node_name: String, // 节点名称
+    pub target_ip: String, // 鐩爣鑺傜偣IP
+    pub latency_ms: f64,   // 寤惰繜(姣)
+    pub packet_loss: f32,  // 涓㈠寘鐜?    pub node_name: String, // 鑺傜偣鍚嶇О
 }
 
-// 定义节点连接统计信息结构体
-pub struct KVNodeConnectionStats {
-    pub conn_type: String, // 连接类型
+// 瀹氫箟鑺傜偣杩炴帴缁熻淇℃伅缁撴瀯浣?pub struct KVNodeConnectionStats {
+    pub conn_type: String, // 杩炴帴绫诲瀷
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub rx_packets: u64,
     pub tx_packets: u64,
 }
-// 定义节点信息结构体
-pub struct KVNodeInfo {
+// 瀹氫箟鑺傜偣淇℃伅缁撴瀯浣?pub struct KVNodeInfo {
     pub peer_id: u32,
     pub hostname: String,
     pub ipv4: String,
     pub latency_ms: f64,
-    pub nat: String, // NAT类型
-    // NodeHopStats 列表 从近到远
+    pub nat: String, // NAT绫诲瀷
+    // NodeHopStats 鍒楄〃 浠庤繎鍒拌繙
     pub hops: Vec<NodeHopStats>,
     pub loss_rate: f32,
     pub connections: Vec<KVNodeConnectionStats>,
 
     pub tunnel_proto: String,
-    pub conn_type: String, // 连接类型
+    pub conn_type: String, // 杩炴帴绫诲瀷
     pub rx_bytes: u64,
     pub tx_bytes: u64,
 
@@ -283,7 +275,7 @@ pub struct KVNodeInfo {
     pub cost: i32,
     pub proxy_cidrs: Vec<String>,
 }
-// 定义节点网络状态结构体
+// 瀹氫箟鑺傜偣缃戠粶鐘舵€佺粨鏋勪綋
 pub struct KVNetworkStatus {
     pub total_nodes: usize,
     pub nodes: Vec<KVNodeInfo>,
@@ -295,7 +287,7 @@ async fn current_running_info() -> Option<easytier::proto::api::manage::NetworkI
     MANAGER.network_info(id).await
 }
 
-// 获取网络中所有节点的IP地址列表
+// 鑾峰彇缃戠粶涓墍鏈夎妭鐐圭殑IP鍦板潃鍒楄〃
 pub async fn get_ips() -> Vec<String> {
     let mut result = Vec::new();
 
@@ -325,7 +317,7 @@ pub async fn get_ips() -> Vec<String> {
     result
 }
 
-// 设置TUN设备的文件描述符
+// 璁剧疆TUN璁惧鐨勬枃浠舵弿杩扮
 pub async fn set_tun_fd(fd: i32) -> Result<(), String> {
     let guard = CURRENT_ID.read().await;
     let id = guard
@@ -384,7 +376,7 @@ pub struct FlagsC {
     pub disable_sym_hole_punching: bool,
     pub tcp_whitelist: String,
     pub udp_whitelist: String,
-    /// SOCKS5 监听端口，0 表示禁用
+    /// SOCKS5 鐩戝惉绔彛锛? 琛ㄧず绂佺敤
     pub socks5_port: u16,
 }
 
@@ -394,8 +386,7 @@ pub struct Forward {
     pub proto: String,
 }
 
-// 创建服务器
-pub fn create_server(
+// 鍒涘缓鏈嶅姟鍣?pub fn create_server(
     username: String,
     enable_dhcp: bool,
     specified_ip: String,
@@ -407,7 +398,7 @@ pub fn create_server(
     forwards: Vec<Forward>,
     flag: FlagsC,
 ) -> JoinHandle<Result<(), String>> {
-    print!("{}", format!("创建服务器: {}，启用DHCP: {}, 指定IP: {}, 房间名称: {}, 房间密码: {}, 服务器URL: {:?}, 监听器URL: {:?}", username, enable_dhcp, specified_ip, room_name, room_password, severurl, onurl));
+    print!("{}", format!("鍒涘缓鏈嶅姟鍣? {}锛屽惎鐢―HCP: {}, 鎸囧畾IP: {}, 鎴块棿鍚嶇О: {}, 鎴块棿瀵嗙爜: {}, 鏈嶅姟鍣║RL: {:?}, 鐩戝惉鍣║RL: {:?}", username, enable_dhcp, specified_ip, room_name, room_password, severurl, onurl));
     RT.spawn(async move {
         // Create config with better error handling
         let cfg = TomlConfigLoader::default();
@@ -431,11 +422,11 @@ pub fn create_server(
         let mut old = cfg.get_port_forwards();
 
         for c in forwards {
-            // 打印
+            // 鎵撳嵃
             println!(
                 "{}",
                 format!(
-                    "添加端口转发: {} -> {} -{}",
+                    "娣诲姞绔彛杞彂: {} -> {} -{}",
                     c.bind_addr, c.dst_addr, c.proto
                 )
             );
@@ -455,7 +446,6 @@ pub fn create_server(
         flags.enable_encryption = flag.enable_encryption;
         flags.enable_ipv6 = flag.enable_ipv6;
         flags.latency_first = flag.latency_first;
-        flags.enable_exit_node = flag.enable_exit_node;
         flags.no_tun = flag.no_tun;
         flags.use_smoltcp = flag.use_smoltcp;
         flags.relay_network_whitelist = flag.relay_network_whitelist;
@@ -471,7 +461,6 @@ pub fn create_server(
         flags.disable_kcp_input = flag.disable_kcp_input;
         flags.disable_relay_kcp = flag.disable_relay_kcp;
         flags.proxy_forward_by_system = flag.proxy_forward_by_system;
-        flags.accept_dns = flag.accept_dns;
 
         flags.private_mode = flag.private_mode;
         flags.enable_quic_proxy = flag.enable_quic_proxy;
@@ -537,57 +526,49 @@ pub fn create_server(
         // Set network identity
         cfg.set_network_identity(NetworkIdentity::new(room_name, room_password));
 
-        // 直接启动网络实例，无需嵌套 spawn
+        // 鐩存帴鍚姩缃戠粶瀹炰緥锛屾棤闇€宓屽 spawn
         create_and_store_network_instance(cfg).await
     })
 }
 
-// 关闭服务器实例
-pub fn close_server() {
+// 鍏抽棴鏈嶅姟鍣ㄥ疄渚?pub fn close_server() {
     RT.spawn(async {
-        // 获取mutex锁
-        let mut locked_instance = CURRENT_ID.write().await;
+        // 鑾峰彇mutex閿?        let mut locked_instance = CURRENT_ID.write().await;
 
         println!(
-            "关闭前实例状态: {}",
+            "鍏抽棴鍓嶅疄渚嬬姸鎬? {}",
             if locked_instance.is_some() {
-                "存在"
+                "瀛樺湪"
             } else {
-                "不存在"
+                "涓嶅瓨鍦?
             }
-        ); // 添加关闭前日志
-
-        // 如果实例存在，则删除它
-        if let Some(id) = locked_instance.take() {
-            println!("正在关闭实例");
+        ); // 娣诲姞鍏抽棴鍓嶆棩蹇?
+        // 濡傛灉瀹炰緥瀛樺湪锛屽垯鍒犻櫎瀹?        if let Some(id) = locked_instance.take() {
+            println!("姝ｅ湪鍏抽棴瀹炰緥");
             let _ = MANAGER.delete_network_instances(vec![id]).await;
-            println!("实例已成功关闭");
+            println!("瀹炰緥宸叉垚鍔熷叧闂?);
         } else {
-            println!("没有找到需要关闭的实例");
+            println!("娌℃湁鎵惧埌闇€瑕佸叧闂殑瀹炰緥");
         }
 
         println!(
-            "关闭后实例状态: {}",
+            "鍏抽棴鍚庡疄渚嬬姸鎬? {}",
             if locked_instance.is_some() {
-                "存在"
+                "瀛樺湪"
             } else {
-                "不存在"
+                "涓嶅瓨鍦?
             }
-        ); // 添加关闭后日志
-    });
+        ); // 娣诲姞鍏抽棴鍚庢棩蹇?    });
 }
 
-// 创建一个网卡跃点数据结构
-// 网卡跃点数据结构
+// 鍒涘缓涓€涓綉鍗¤穬鐐规暟鎹粨鏋?// 缃戝崱璺冪偣鏁版嵁缁撴瀯
 
 pub async fn get_peer_route_pairs() -> Result<Vec<PeerRoutePair>, String> {
     if let Some(info) = current_running_info().await {
                 let mut pairs = info.peer_route_pairs;
-                // 如果存在本地节点信息，添加到结果中
-                if let Some(my_node_info) = &info.my_node_info {
-                    // 获取本地节点ID
-                    // 注意：这里的逻辑可能需要根据单例模式调整，假设本地节点信息可以直接从 info 中获取
-                    // 使用原始逻辑查找本地 peer_id
+                // 濡傛灉瀛樺湪鏈湴鑺傜偣淇℃伅锛屾坊鍔犲埌缁撴灉涓?                if let Some(my_node_info) = &info.my_node_info {
+                    // 鑾峰彇鏈湴鑺傜偣ID
+                    // 娉ㄦ剰锛氳繖閲岀殑閫昏緫鍙兘闇€瑕佹牴鎹崟渚嬫ā寮忚皟鏁达紝鍋囪鏈湴鑺傜偣淇℃伅鍙互鐩存帴浠?info 涓幏鍙?                    // 浣跨敤鍘熷閫昏緫鏌ユ壘鏈湴 peer_id
                     let my_peer_id = info
                         .peers
                         .iter()
@@ -595,52 +576,45 @@ pub async fn get_peer_route_pairs() -> Result<Vec<PeerRoutePair>, String> {
                         .map(|p| p.peer_id)
                         .unwrap_or(0);
 
-                    // 创建一个表示本地节点的Route
+                    // 鍒涘缓涓€涓〃绀烘湰鍦拌妭鐐圭殑Route
                     let my_route = proto::api::instance::Route {
                         peer_id: my_peer_id,
                         ipv4_addr: my_node_info.virtual_ipv4.clone(),
-                        ipv6_addr: None, // 添加ipv6地址字段,目前暂不支持ipv6
-                        next_hop_peer_id: my_peer_id, // 指向自己
-                        cost: 0,         // 到自己的成本为0
-                        path_latency: 0, // 到自己的延迟为0
+                        ipv6_addr: None, // 娣诲姞ipv6鍦板潃瀛楁,鐩墠鏆備笉鏀寔ipv6
+                        next_hop_peer_id: my_peer_id, // 鎸囧悜鑷繁
+                        cost: 0,         // 鍒拌嚜宸辩殑鎴愭湰涓?
+                        path_latency: 0, // 鍒拌嚜宸辩殑寤惰繜涓?
                         proxy_cidrs: vec![],
                         hostname: my_node_info.hostname.clone(),
                         stun_info: my_node_info.stun_info.clone(),
-                        inst_id: "local".to_string(), // 标记为本地实例
-                        version: my_node_info.version.clone(),
-                        feature_flag: None, // 本地节点通常没有特性标志
-                        next_hop_peer_id_latency_first: None,
+                        inst_id: "local".to_string(), // 鏍囪涓烘湰鍦板疄渚?                        version: my_node_info.version.clone(),
+                        feature_flag: None, // 鏈湴鑺傜偣閫氬父娌℃湁鐗规€ф爣蹇?                        next_hop_peer_id_latency_first: None,
                         cost_latency_first: None,
                         path_latency_latency_first: None,
-                        public_ipv6_addr: None,
-                        ipv6_public_addr_prefix: None,
                     };
 
-                    // 创建一个表示本地节点的PeerInfo，包含网络统计信息
-                    // 注意：本地节点的PeerInfo可能需要特殊处理或从其他地方获取
-                    let my_peer_info = info.peers.iter().find(|p| p.peer_id == my_peer_id).cloned();
+                    // 鍒涘缓涓€涓〃绀烘湰鍦拌妭鐐圭殑PeerInfo锛屽寘鍚綉缁滅粺璁′俊鎭?                    // 娉ㄦ剰锛氭湰鍦拌妭鐐圭殑PeerInfo鍙兘闇€瑕佺壒娈婂鐞嗘垨浠庡叾浠栧湴鏂硅幏鍙?                    let my_peer_info = info.peers.iter().find(|p| p.peer_id == my_peer_id).cloned();
 
-                    // 创建一个表示本地节点的PeerRoutePair
+                    // 鍒涘缓涓€涓〃绀烘湰鍦拌妭鐐圭殑PeerRoutePair
                     let my_pair = proto::api::instance::PeerRoutePair {
                         route: Some(my_route),
-                        peer: my_peer_info, // 使用找到的PeerInfo或None
+                        peer: my_peer_info, // 浣跨敤鎵惧埌鐨凱eerInfo鎴朜one
                     };
 
-                    // 添加到结果中
+                    // 娣诲姞鍒扮粨鏋滀腑
                     pairs.push(my_pair);
                 }
 
                 return Ok(pairs);
     } else {
-        Err("没有运行中的网络实例".to_string())
+        Err("娌℃湁杩愯涓殑缃戠粶瀹炰緥".to_string())
     }
 }
 
-// 获取网络状态信息
-pub async fn get_network_status() -> KVNetworkStatus {
+// 鑾峰彇缃戠粶鐘舵€佷俊鎭?pub async fn get_network_status() -> KVNetworkStatus {
     let pairs = get_peer_route_pairs().await.unwrap_or_default();
 
-    // 提前获取运行信息
+    // 鎻愬墠鑾峰彇杩愯淇℃伅
     let running_info = current_running_info().await;
     let local_peer_id = running_info
         .as_ref()
@@ -656,7 +630,7 @@ pub async fn get_network_status() -> KVNetworkStatus {
     for pair in pairs.iter() {
         if let Some(route) = &pair.route {
             let cost = route.cost;
-            // 使用 get_running_info 中的逻辑来获取IPv4地址
+            // 浣跨敤 get_running_info 涓殑閫昏緫鏉ヨ幏鍙朓Pv4鍦板潃
             let ipv4 = route
                 .ipv4_addr
                 .as_ref()
@@ -676,7 +650,7 @@ pub async fn get_network_status() -> KVNetworkStatus {
                 hostname: route.hostname.clone(),
 
                 hops: {
-                    // 新建递归函数收集完整路径
+                    // 鏂板缓閫掑綊鍑芥暟鏀堕泦瀹屾暣璺緞
                     fn collect_hops(
                         pairs: &[PeerRoutePair],
                         current_peer_id: u32,
@@ -688,14 +662,13 @@ pub async fn get_network_status() -> KVNetworkStatus {
                         }
                         visited.insert(current_peer_id);
 
-                        // 查找当前节点的信息
-                        if let Some(pair) = pairs.iter().find(|p| {
+                        // 鏌ユ壘褰撳墠鑺傜偣鐨勪俊鎭?                        if let Some(pair) = pairs.iter().find(|p| {
                             p.route
                                 .as_ref()
                                 .map_or(false, |r| r.peer_id == current_peer_id)
                         }) {
                             if let Some(route) = &pair.route {
-                                // 获取IP地址
+                                // 鑾峰彇IP鍦板潃
                                 let ip = route
                                     .ipv4_addr
                                     .as_ref()
@@ -711,7 +684,7 @@ pub async fn get_network_status() -> KVNetworkStatus {
                                     })
                                     .unwrap_or_default();
 
-                                // 计算延迟和丢包率
+                                // 璁＄畻寤惰繜鍜屼涪鍖呯巼
                                 let (latency, loss) = pair.peer.as_ref().map_or((0.0, 0.0), |p| {
                                     let min_latency = p
                                         .conns
@@ -728,8 +701,7 @@ pub async fn get_network_status() -> KVNetworkStatus {
                                     (min_latency, avg_loss as f64)
                                 });
 
-                                // 添加当前节点到路径
-                                path.push(NodeHopStats {
+                                // 娣诲姞褰撳墠鑺傜偣鍒拌矾寰?                                path.push(NodeHopStats {
                                     peer_id: current_peer_id,
                                     target_ip: ip,
                                     latency_ms: latency,
@@ -737,12 +709,11 @@ pub async fn get_network_status() -> KVNetworkStatus {
                                     node_name: route.hostname.clone(),
                                 });
 
-                                // 如果下一跳不是自己，继续递归
+                                // 濡傛灉涓嬩竴璺充笉鏄嚜宸憋紝缁х画閫掑綊
                                 if route.next_hop_peer_id != current_peer_id
                                     && route.next_hop_peer_id != 0
                                 {
-                                    // 查找下一跳节点
-                                    return collect_hops(
+                                    // 鏌ユ壘涓嬩竴璺宠妭鐐?                                    return collect_hops(
                                         pairs,
                                         route.next_hop_peer_id,
                                         path,
@@ -754,7 +725,7 @@ pub async fn get_network_status() -> KVNetworkStatus {
                         path
                     }
 
-                    // 使用路由表中的next_hop_peer_id构建完整路径
+                    // 浣跨敤璺敱琛ㄤ腑鐨刵ext_hop_peer_id鏋勫缓瀹屾暣璺緞
                     let mut hops = Vec::new();
                     if let Some(route) = &pair.route {
                         let mut visited = std::collections::HashSet::new();
@@ -773,11 +744,10 @@ pub async fn get_network_status() -> KVNetworkStatus {
                             })
                             .unwrap_or_default();
 
-                        // 从当前节点开始，收集到目标节点的完整路径
-                        // 先添加本地节点信息
-                        if let Some(info) = &running_info {
+                        // 浠庡綋鍓嶈妭鐐瑰紑濮嬶紝鏀堕泦鍒扮洰鏍囪妭鐐圭殑瀹屾暣璺緞
+                        // 鍏堟坊鍔犳湰鍦拌妭鐐逛俊鎭?                        if let Some(info) = &running_info {
                             if let Some(local_node) = &info.my_node_info {
-                                // 添加本地节点作为起点
+                                // 娣诲姞鏈湴鑺傜偣浣滀负璧风偣
                                 hops.push(NodeHopStats {
                                     peer_id: local_peer_id,
                                     target_ip: local_node
@@ -799,11 +769,10 @@ pub async fn get_network_status() -> KVNetworkStatus {
                                     node_name: local_node.hostname.clone(),
                                 });
 
-                                // 查找从本地到目标节点的路由
-                                if let Some(local_route) =
+                                // 鏌ユ壘浠庢湰鍦板埌鐩爣鑺傜偣鐨勮矾鐢?                                if let Some(local_route) =
                                     info.routes.iter().find(|r| r.peer_id == route.peer_id)
                                 {
-                                    // 收集中间节点
+                                    // 鏀堕泦涓棿鑺傜偣
                                     let mut next_hops = collect_hops(
                                         pairs.as_slice(),
                                         local_route.next_hop_peer_id,
@@ -812,15 +781,13 @@ pub async fn get_network_status() -> KVNetworkStatus {
                                     );
                                     hops.append(&mut next_hops);
 
-                                    // 确保目标节点被添加到路径中
-                                    // 检查最后一个节点是否是目标节点
+                                    // 纭繚鐩爣鑺傜偣琚坊鍔犲埌璺緞涓?                                    // 妫€鏌ユ渶鍚庝竴涓妭鐐规槸鍚︽槸鐩爣鑺傜偣
                                     let last_node_is_target = hops.last().map_or(false, |last| {
-                                        // 比较目标IP
+                                        // 姣旇緝鐩爣IP
                                         last.target_ip == target_ip
                                     });
 
-                                    // 如果最后一个节点不是目标节点，则添加目标节点
-                                    if !last_node_is_target && !visited.contains(&route.peer_id) {
+                                    // 濡傛灉鏈€鍚庝竴涓妭鐐逛笉鏄洰鏍囪妭鐐癸紝鍒欐坊鍔犵洰鏍囪妭鐐?                                    if !last_node_is_target && !visited.contains(&route.peer_id) {
                                         let (latency, loss) =
                                             pair.peer.as_ref().map_or((0.0, 0.0), |p| {
                                                 let min_latency = p
@@ -856,11 +823,9 @@ pub async fn get_network_status() -> KVNetworkStatus {
                             }
                         }
 
-                        // 如果没有收集到任何跳点（可能是直连节点），则直接添加目标节点
-                        // 检查 hops 是否只包含本地节点
-                        if hops.len() <= 1 {
-                            // 确保目标节点不在hops中（避免重复添加）
-                            if !hops.iter().any(|h| h.target_ip == target_ip) {
+                        // 濡傛灉娌℃湁鏀堕泦鍒颁换浣曡烦鐐癸紙鍙兘鏄洿杩炶妭鐐癸級锛屽垯鐩存帴娣诲姞鐩爣鑺傜偣
+                        // 妫€鏌?hops 鏄惁鍙寘鍚湰鍦拌妭鐐?                        if hops.len() <= 1 {
+                            // 纭繚鐩爣鑺傜偣涓嶅湪hops涓紙閬垮厤閲嶅娣诲姞锛?                            if !hops.iter().any(|h| h.target_ip == target_ip) {
                                 let (latency, loss) = pair.peer.as_ref().map_or((0.0, 0.0), |p| {
                                     let min_latency = p
                                         .conns
@@ -903,12 +868,12 @@ pub async fn get_network_status() -> KVNetworkStatus {
                     }
                     total_loss_rate
                 } else {
-                    0.0 // 如果没有连接信息，默认为0
+                    0.0 // 濡傛灉娌℃湁杩炴帴淇℃伅锛岄粯璁や负0
                 },
                 nat: route.stun_info.as_ref().map_or_else(
                     || "Unknown".to_string(),
                     |stun| {
-                        // 使用NatType枚举替代直接匹配数字
+                        // 浣跨敤NatType鏋氫妇鏇夸唬鐩存帴鍖归厤鏁板瓧
                         let nat_type =
                             NatType::try_from(stun.udp_nat_type).unwrap_or(NatType::Unknown);
                         // println!("udp{:?}", NatType::try_from(stun.udp_nat_type).unwrap_or(NatType::Unknown));
@@ -930,14 +895,14 @@ pub async fn get_network_status() -> KVNetworkStatus {
                 proxy_cidrs: route.proxy_cidrs.clone(),
             };
 
-            // 收集连接统计信息
+            // 鏀堕泦杩炴帴缁熻淇℃伅
             if let Some(peer) = &pair.peer {
                 for conn in &peer.conns {
                     if let Some(stats) = &conn.stats {
                         let conn_type = if let Some(tunnel) = &conn.tunnel {
                             tunnel.tunnel_type.clone()
                         } else {
-                            "未知".to_string()
+                            "鏈煡".to_string()
                         };
 
                         node_info.connections.push(KVNodeConnectionStats {
