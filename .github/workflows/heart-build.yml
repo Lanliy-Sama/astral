@@ -45,10 +45,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Checkout modded EasyTier (Easytier-Heart branch)
+      - name: Checkout EasyTier-Custom kernel
         uses: actions/checkout@v4
         with:
-          ref: Easytier-Heart
+          repository: 225284228a-droid/EasyTier-Custom
+          ref: main
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -70,7 +71,7 @@ jobs:
           cache: false
 
       - name: Build easytier-core (modded)
-        run: cargo build --release --target ${{ matrix.TARGET }} --package easytier --bin easytier-core --features "wireguard,websocket,quic,tun,smoltcp,socks5,kcp,faketcp,magic-dns,zstd"
+        run: cargo build --release --target ${{ matrix.TARGET }} --package easytier --bin easytier-core --features "wireguard,websocket,quic,tun,smoltcp,socks5,kcp,faketcp,zstd"
         env:
           RUSTFLAGS: "--cap-lints=warn"
 
