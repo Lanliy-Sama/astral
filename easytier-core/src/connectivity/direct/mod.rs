@@ -62,8 +62,10 @@ mod udp;
 
 const DIRECT_CONNECTOR_BLACKLIST_TIMEOUT: Duration = Duration::from_secs(300);
 const INVALID_SERVICE_BLACKLIST_TIMEOUT: Duration = Duration::from_secs(3600);
-// Heart mod: 3 -> 5s, lossy-path punch/handshake gets a fuller budget per attempt
-const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+// Heart mod: back to the upstream 3s. The round-2 experiment (5s) slowed
+// establishment on peers whose direct candidates are hopeless (symmetric NAT):
+// every failed candidate pays the full budget before relay fallback wins.
+const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DIRECT_TASK_LOOP_INTERVAL_MS: u64 = 5000;
 const MAX_IPV6_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
 const MAX_UDP_HOLE_PUNCH_CONNECTOR_ADDRS: usize = 16;
