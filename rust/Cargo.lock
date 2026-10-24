@@ -1324,7 +1324,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 [[package]]
 name = "easytier"
 version = "2.7.0"
-source = "git+https://github.com/225284228a-droid/EasyTier-Custom.git?branch=main#9155de11401cff16ad91e2891388ec9b9a438469"
+source = "git+https://github.com/Lanliy-Sama/astral.git?branch=Easytier-Heart#f28d878a229771b5b9436a200aa956ca0c124b9d"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1430,7 +1430,7 @@ dependencies = [
 [[package]]
 name = "easytier-core"
 version = "2.7.0"
-source = "git+https://github.com/225284228a-droid/EasyTier-Custom.git?branch=main#9155de11401cff16ad91e2891388ec9b9a438469"
+source = "git+https://github.com/Lanliy-Sama/astral.git?branch=Easytier-Heart#f28d878a229771b5b9436a200aa956ca0c124b9d"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1502,7 +1502,7 @@ dependencies = [
 [[package]]
 name = "easytier-proto"
 version = "2.7.0"
-source = "git+https://github.com/225284228a-droid/EasyTier-Custom.git?branch=main#9155de11401cff16ad91e2891388ec9b9a438469"
+source = "git+https://github.com/Lanliy-Sama/astral.git?branch=Easytier-Heart#f28d878a229771b5b9436a200aa956ca0c124b9d"
 dependencies = [
  "anyhow",
  "async-trait",
