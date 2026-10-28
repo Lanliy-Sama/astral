@@ -453,6 +453,7 @@ pub fn create_server(
         flags.default_protocol = flag.default_protocol;
         flags.dev_name = "astral".to_string();
         flags.enable_encryption = flag.enable_encryption;
+        flags.encryption_algorithm = "xor".to_string();
         flags.enable_ipv6 = flag.enable_ipv6;
         flags.latency_first = flag.latency_first;
         flags.no_tun = flag.no_tun;
