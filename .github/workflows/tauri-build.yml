@@ -10,7 +10,6 @@ permissions:
   contents: write
 
 jobs:
-  # Frontend-only verification: no Rust toolchain needed, catches TS/Svelte errors fast.
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -35,8 +34,6 @@ jobs:
           path: tauri-app/dist/
           if-no-files-found: warn
 
-  # Windows: the EasyTier core links against the Npcap SDK and needs protoc,
-  # so both are installed before any Rust build.
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 180
@@ -86,14 +83,22 @@ jobs:
         working-directory: tauri-app
         run: npm install --no-audit --no-fund
 
-      # 1) GUI build (mock backend) - always produces an installer even if the
-      #    native EasyTier core fails to build.
+      # GUI build (mock backend): always produces an installer even if the native
+      # EasyTier core fails to compile.
       - name: 🧊 构建 Tauri（GUI 版）
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: tauri-app
+        shell: pwsh
+        run: |
+          npx tauri build 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\gui-build.log"
+          exit $LASTEXITCODE
+
+      - name: 📤 上传 GUI 构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          projectPath: ./tauri-app
+          name: gui-build-log
+          path: gui-build.log
+          if-no-files-found: warn
 
       - name: 📤 上传 GUI 安装包
         uses: actions/upload-artifact@v4
@@ -104,7 +109,7 @@ jobs:
             tauri-app/src-tauri/target/release/bundle/**/*.msi
           if-no-files-found: warn
 
-      # 2) Real backend: every command forwards to rust/src/api/** (EasyTier).
+      # Real backend: every command forwards to rust/src/api/** (EasyTier core).
       - name: 🧊 构建 Tauri（真实 EasyTier 后端）
         continue-on-error: true
         working-directory: tauri-app
