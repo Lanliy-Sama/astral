@@ -10,6 +10,7 @@ permissions:
   contents: write
 
 jobs:
+  # Fast checks that need no Rust toolchain.
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -34,6 +35,9 @@ jobs:
           path: tauri-app/dist/
           if-no-files-found: warn
 
+  # The shipped build: one Windows installer with the real EasyTier core linked.
+  # rust_lib_astral is built with default-features = false, so the Flutter-only
+  # flutter_rust_bridge layer and frb_generated.rs are not compiled at all.
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 180
@@ -83,57 +87,29 @@ jobs:
         working-directory: tauri-app
         run: npm install --no-audit --no-fund
 
-      # GUI build (mock backend): always produces an installer even if the native
-      # EasyTier core fails to compile.
-      - name: 🧊 构建 Tauri（GUI 版）
-        working-directory: tauri-app
-        shell: pwsh
-        run: |
-          npx tauri build 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\gui-build.log"
-          exit $LASTEXITCODE
-
-      - name: 📤 上传 GUI 构建日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-build-log
-          path: gui-build.log
-          if-no-files-found: warn
-
-      - name: 📤 上传 GUI 安装包
-        uses: actions/upload-artifact@v4
-        with:
-          name: astral-tauri-windows-gui
-          path: |
-            tauri-app/src-tauri/target/release/bundle/**/*.exe
-            tauri-app/src-tauri/target/release/bundle/**/*.msi
-          if-no-files-found: warn
-
-      # Real backend: every command forwards to rust/src/api/** (EasyTier core).
-      - name: 🧊 构建 Tauri（真实 EasyTier 后端）
-        continue-on-error: true
+      - name: 🧊 构建并打包（真实 EasyTier 后端）
         working-directory: tauri-app
         shell: pwsh
         env:
           NPCAP_SDK_LIB: ${{ github.workspace }}\third_party\npcap-sdk\Lib\x64
         run: |
           npx tauri build --features real-backend 2>&1 |
-            Tee-Object -FilePath "$env:GITHUB_WORKSPACE\real-backend-build.log"
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE\build.log"
           exit $LASTEXITCODE
 
-      - name: 📤 上传真实后端安装包
+      - name: 📤 上传安装包
         uses: actions/upload-artifact@v4
         with:
-          name: astral-tauri-windows-real-backend
+          name: astral-tauri-windows
           path: |
             tauri-app/src-tauri/target/release/bundle/**/*.exe
             tauri-app/src-tauri/target/release/bundle/**/*.msi
           if-no-files-found: warn
 
-      - name: 📤 上传真实后端构建日志
+      - name: 📤 上传构建日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: real-backend-build-log
-          path: real-backend-build.log
+          name: build-log
+          path: build.log
           if-no-files-found: warn
