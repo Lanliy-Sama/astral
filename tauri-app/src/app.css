@@ -1,0 +1,289 @@
+/*
+ * Astral — 全局样式
+ * 像素级还原 Flutter Material 3 (useMaterial3, colorSchemeSeed, MiSans) 的视觉效果。
+ * 所有颜色来自 theme/scheme.ts 动态生成的 --md-sys-color-* CSS 变量。
+ */
+
+/* ---------- 字体注册 ----------
+ * 原项目 pubspec 注册方式:
+ *   - MiSans-Demibold.ttf  → 无 weight(默认,服务 w400/w500 及全部常规字重)
+ *   - MiSans-Regular.ttf   → weight: 800
+ * 即: 常规文本用 Demibold 渲染, w800+ 请求落到 Regular。
+ */
+@font-face {
+  font-family: 'MiSans';
+  src: url('./assets/fonts/MiSans-Demibold.ttf') format('truetype');
+  font-weight: 100 799;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'MiSans';
+  src: url('./assets/fonts/MiSans-Regular.ttf') format('truetype');
+  font-weight: 800 900;
+  font-style: normal;
+  font-display: block;
+}
+
+/* Material Icons — 与 Flutter Icons 类的连字名称一一对应 */
+@font-face {
+  font-family: 'Material Icons';
+  font-style: normal;
+  font-weight: 400;
+  src: url('./assets/fonts/material-icons.woff2') format('woff2');
+  font-display: block;
+}
+@font-face {
+  font-family: 'Material Icons Outlined';
+  font-style: normal;
+  font-weight: 400;
+  src: url('./assets/fonts/material-icons-outlined.woff2') format('woff2');
+  font-display: block;
+}
+
+.material-icons,
+.material-icons-outlined {
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-smoothing: antialiased;
+  display: inline-block;
+  direction: ltr;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'liga';
+  font-style: normal;
+  font-weight: normal;
+  letter-spacing: normal;
+  line-height: 1;
+  text-transform: none;
+  white-space: nowrap;
+  word-wrap: normal;
+  user-select: none;
+  font-family: 'Material Icons';
+}
+.material-icons-outlined {
+  font-family: 'Material Icons Outlined';
+}
+
+/* ---------- 基础 reset ---------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'MiSans', 'Material Icons', 'Noto Sans SC', sans-serif;
+  font-size: 14px; /* Flutter 默认 DefaultTextStyle = bodyMedium(14) */
+  line-height: 20px;
+  color: var(--md-sys-color-on-surface);
+  background: var(--md-sys-color-surface);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+input,
+textarea {
+  font-family: inherit;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+img {
+  display: block;
+}
+
+button {
+  font-family: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* 焦点环隐藏 (Flutter 无 focus ring) */
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: none;
+}
+
+/* ---------- 滚动条 (Flutter overlay 风格) ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, 0.45) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.45);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.7);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---------- M3 阴影 (对应 Flutter elevation) ---------- */
+.elevation-1 {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 1px 3px 1px rgba(0, 0, 0, 0.15);
+}
+.elevation-2 {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 2px 6px 2px rgba(0, 0, 0, 0.15);
+}
+.elevation-3 {
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.3),
+    0 4px 8px 3px rgba(0, 0, 0, 0.15);
+}
+.elevation-4 {
+  box-shadow:
+    0 2px 3px rgba(0, 0, 0, 0.3),
+    0 6px 10px 4px rgba(0, 0, 0, 0.15);
+}
+.elevation-6 {
+  box-shadow:
+    0 3px 5px -1px rgba(0, 0, 0, 0.2),
+    0 6px 10px rgba(0, 0, 0, 0.14),
+    0 1px 18px rgba(0, 0, 0, 0.12);
+}
+
+/* ---------- M3 排字 (Typography.material2021) ---------- */
+.display-large { font-size: 57px; line-height: 64px; font-weight: 400; letter-spacing: -0.25px; }
+.display-medium { font-size: 45px; line-height: 52px; font-weight: 400; }
+.display-small { font-size: 36px; line-height: 44px; font-weight: 400; }
+.headline-large { font-size: 32px; line-height: 40px; font-weight: 400; }
+.headline-medium { font-size: 28px; line-height: 36px; font-weight: 400; }
+.headline-small { font-size: 24px; line-height: 32px; font-weight: 400; }
+.title-large { font-size: 22px; line-height: 28px; font-weight: 400; }
+.title-medium { font-size: 16px; line-height: 24px; font-weight: 500; letter-spacing: 0.15px; }
+.title-small { font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: 0.1px; }
+.body-large { font-size: 16px; line-height: 24px; font-weight: 400; letter-spacing: 0.5px; }
+.body-medium { font-size: 14px; line-height: 20px; font-weight: 400; letter-spacing: 0.25px; }
+.body-small { font-size: 12px; line-height: 16px; font-weight: 400; letter-spacing: 0.4px; }
+.label-large { font-size: 14px; line-height: 20px; font-weight: 500; letter-spacing: 0.1px; }
+.label-medium { font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: 0.5px; }
+.label-small { font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.5px; }
+
+/* Flutter 常用字重工具类 */
+.fw-300 { font-weight: 300; }
+.fw-400 { font-weight: 400; }
+.fw-500 { font-weight: 500; }
+.fw-600 { font-weight: 600; }
+.fw-700 { font-weight: 700; }
+.fw-bold { font-weight: 700; }
+.italic { font-style: italic; }
+.mono { font-family: 'Sarasa Mono SC', 'Cascadia Mono', Consolas, 'Courier New', monospace; }
+
+/* ---------- 通用布局工具 (对应 Flutter SizedBox/Padding/Alignment) ---------- */
+.row { display: flex; flex-direction: row; align-items: stretch; }
+.col { display: flex; flex-direction: column; }
+.flex { flex: 1; min-width: 0; min-height: 0; }
+.center { display: flex; align-items: center; justify-content: center; }
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spacer { flex: 1 1 0; }
+
+/* ---------- Ripple (InkWell) ---------- */
+.inkwell {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.inkwell.disabled {
+  cursor: default;
+  pointer-events: none;
+}
+.ripple-ink {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  background: var(--ripple-color, currentColor);
+  opacity: 0.12;
+  transform: scale(0);
+  animation: ripple-expand 0.45s cubic-bezier(0.05, 0.7, 0.1, 1) forwards;
+}
+@keyframes ripple-expand {
+  to {
+    transform: scale(1);
+    opacity: 0.12;
+  }
+}
+.ripple-ink.fade-out {
+  animation: ripple-fade 0.3s ease-out forwards;
+}
+@keyframes ripple-fade {
+  from {
+    opacity: 0.12;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+/* ---------- Flutter Tooltip ---------- */
+.flutter-tooltip {
+  position: fixed;
+  z-index: 100000;
+  background: #3c3c41; /* Flutter richBlack(500) */
+  color: #fff;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 16px;
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.flutter-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ---------- 过渡曲线 (Flutter Curves) ---------- */
+:root {
+  --ease-material: cubic-bezier(0.2, 0, 0, 1);
+  --ease-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
+  --ease-in-out-cubic: cubic-bezier(0.646, 0.045, 0.355, 1);
+  --ease-out-cubic: cubic-bezier(0.215, 0.61, 0.355, 1);
+  --ease-out-quad: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-in-quad: cubic-bezier(0.55, 0.085, 0.68, 0.53);
+}

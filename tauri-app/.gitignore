@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+.vite/
+src-tauri/target/
+src-tauri/gen/
+
+# MiSans ships in the Flutter project at <repo>/fonts/ and is copied into
+# src/assets/fonts by scripts/sync-assets.mjs before dev/build, so ~16 MB of TTF
+# is not duplicated in git.
+src/assets/fonts/MiSans-Regular.ttf
+src/assets/fonts/MiSans-Demibold.ttf

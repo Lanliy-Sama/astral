@@ -1,0 +1,33 @@
+{
+  "name": "astral-tauri",
+  "private": true,
+  "version": "2.9.70",
+  "description": "Astral - 基于 EasyTier 的跨平台 P2P 网络应用 (Tauri + Svelte 5 移植版)",
+  "type": "module",
+  "scripts": {
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "predev": "npm run sync-assets",
+    "dev": "vite",
+    "prebuild": "npm run sync-assets",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@material/material-color-utilities": "^0.3.0",
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-window-state": "^2.5.0",
+    "fflate": "^0.8.3",
+    "material-icons": "^1.13.14",
+    "uuid": "^14.0.3"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.1.1",
+    "@tauri-apps/cli": "^2.9.0",
+    "svelte": "^5.57.3",
+    "svelte-check": "^4.1.4",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.5"
+  }
+}
