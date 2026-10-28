@@ -1,0 +1,43 @@
+name: 📸 Flutter 基准截图
+
+# Produces the reference screenshots of the existing Flutter UI, so the Tauri
+# branch's pages can be compared against them page by page.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screenshots:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 🛠️ 检出代码
+        uses: actions/checkout@v4
+
+      - name: 🐦 安装 Flutter
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\install_flutter.ps1"
+        shell: pwsh
+
+      - name: 📦 安装依赖
+        run: flutter pub get
+        shell: pwsh
+
+      - name: 📸 生成基准截图
+        run: flutter test --update-goldens test/golden_baseline_test.dart
+        shell: pwsh
+        continue-on-error: true
+
+      - name: 📤 上传截图
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-baseline-screenshots
+          path: test/goldens/
+          if-no-files-found: warn
