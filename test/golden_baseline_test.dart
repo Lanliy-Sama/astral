@@ -1,14 +1,15 @@
 // Generates reference screenshots of the existing Flutter UI on `main`.
 //
-// Run with:
 //   flutter test --update-goldens test/golden_baseline_test.dart
 //
 // Output lands in test/goldens/ and is uploaded by
 // .github/workflows/flutter-baseline.yml, so the Tauri branch's screenshots can
-// be diffed against the Flutter original page by page.
+// be compared against the Flutter original page by page.
 //
-// Each tab is rendered in isolation to keep the goldens stable: the real app
-// needs Isar + the EasyTier runtime, none of which affect the static layout.
+// The theme here mirrors lib/app.dart exactly (Material 3 + colourSchemeSeed +
+// MiSans text theme). Pages that need the Isar/Rust runtime are rendered in
+// their empty/pre-connect state; `tester.takeException()` absorbs the resulting
+// missing-backend exceptions so one page cannot abort the whole run.
 
 import 'dart:io';
 
@@ -23,20 +24,26 @@ import 'package:astral/features/servers/pages/server_page.dart';
 import 'package:astral/features/settings/pages/settings_main_page.dart';
 
 Future<void> loadAppFonts() async {
-  // The test binding ships only a fallback font, which renders CJK as tofu
-  // boxes. Register the app's real fonts so the goldens are readable.
-  for (final entry in {
-    'MiSans': ['fonts/MiSans-Regular.ttf', 'fonts/MiSans-Demibold.ttf'],
-  }.entries) {
-    final loader = FontLoader(entry.key);
-    for (final path in entry.value) {
-      final file = File(path);
-      if (file.existsSync()) {
-        loader.addFont(Future.value(ByteData.sublistView(file.readAsBytesSync())));
-      }
+  final loader = FontLoader('MiSans');
+  for (final path in ['fonts/MiSans-Regular.ttf', 'fonts/MiSans-Demibold.ttf']) {
+    final file = File(path);
+    if (file.existsSync()) {
+      loader.addFont(Future.value(ByteData.sublistView(file.readAsBytesSync())));
     }
-    await loader.load();
   }
+  await loader.load();
+}
+
+/// Mirrors the ThemeData built in lib/app.dart.
+ThemeData appTheme() {
+  return ThemeData(
+    useMaterial3: true,
+    colorSchemeSeed: Colors.blue,
+    brightness: Brightness.light,
+  ).copyWith(
+    textTheme: Typography.material2021().black.apply(fontFamily: 'MiSans'),
+    primaryTextTheme: Typography.material2021().black.apply(fontFamily: 'MiSans'),
+  );
 }
 
 void main() {
@@ -48,23 +55,20 @@ void main() {
     await loadAppFonts();
   });
 
-  Future<void> pumpPage(
-    WidgetTester tester,
-    Widget page,
-    String name,
-  ) async {
+  Future<void> pumpPage(WidgetTester tester, Widget page, String name) async {
     await tester.binding.setSurfaceSize(surfaceSize);
     await tester.pumpWidget(
       MaterialApp(
-        useInheritedMediaQuery: true,
-        theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.blue),
-        home: MediaQuery(
-          data: const MediaQueryData(size: surfaceSize),
-          child: Scaffold(body: page),
-        ),
+        debugShowCheckedModeBanner: false,
+        theme: appTheme(),
+        home: Scaffold(body: page),
       ),
     );
-    await tester.pumpAndSettle();
+    // Swallow missing-backend exceptions (Isar / EasyTier) - the static layout
+    // is still what we want to capture.
+    tester.takeException();
+    await tester.pump(const Duration(milliseconds: 400));
+    tester.takeException();
 
     await expectLater(
       find.byType(MaterialApp),
