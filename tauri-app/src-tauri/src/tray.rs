@@ -53,8 +53,7 @@ pub fn setup_close_behavior(app: &App) -> Result<(), Box<dyn std::error::Error>>
         .get_webview_window("main")
         .ok_or("main window not found")?;
 
-    // The handler is registered on `window`, so the closure must own a clone
-    // rather than the same value it borrows.
+    // The handler is registered on `window`, so the closure owns a clone.
     let handle = window.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {

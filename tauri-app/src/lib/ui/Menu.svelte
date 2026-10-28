@@ -118,7 +118,7 @@
   .m3-menu {
     position: fixed;
     z-index: 1500;
-    background: var(--md-sys-color-surface-container);
+    background: var(--md-sys-color-surface-container-high);
     border-radius: 4px;
     padding: 8px 0;
     animation: menu-in 0.12s var(--ease-decelerate);

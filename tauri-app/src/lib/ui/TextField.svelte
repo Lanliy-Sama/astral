@@ -1,5 +1,6 @@
 <script lang="ts">
-  // M3 TextField (OutlineInputBorder) — 56 高 / 圆角 4 / 浮动 label / 前后缀图标 / 错误与帮助文本
+  // M3 TextField (OutlineInputBorder) — 56 高 / 圆角 4 / 浮动 label 断开上边框 (fieldset/legend 原生缺口)
+  // 对应 Flutter InputDecoration(floatingLabelBehavior: always/floatingLabelBehavior.auto)
   import Icon from './Icon.svelte'
 
   let {
@@ -48,61 +49,76 @@
 
   let focused = $state(false)
 
-  let floated = $derived(focused || value !== '' || !!hint || floatAlways)
+  // Flutter: label 浮起 = 聚焦 || 有值 || floatingLabelBehavior.always (hint 不影响浮起)
+  let floated = $derived(focused || value !== '' || floatAlways)
+  // Flutter: hintText 仅在聚焦时显示
+  let showHint = $derived(focused ? hint : '')
   let isError = $derived(!!errorText)
   let hasLabel = $derived(!!label)
 </script>
 
 <div class="m3-textfield" class:disabled class:is-error={isError} class:no-label={!hasLabel}>
-  <div class="container" class:focused style="border-radius: 4px;">
-    {#if prefixIcon}
-      <div class="icon-slot">
-        <Icon name={prefixIcon} size={iconSize} color="var(--md-sys-color-primary)" />
-      </div>
+  <fieldset
+    class="container"
+    class:focused
+    class:floated
+    class:multiline={textarea}
+    class:has-prefix={!!prefixIcon}
+    aria-hidden="true"
+  >
+    {#if hasLabel && floated}
+      <legend class="lbl" class:is-error={isError}>{label}</legend>
     {/if}
-    <div class="field-area">
-      {#if label}
-        <label class:floated class:is-error={isError}>{label}</label>
+    <div class="inner">
+      {#if prefixIcon}
+        <div class="icon-slot">
+          <Icon name={prefixIcon} size={iconSize} color="var(--md-sys-color-primary)" />
+        </div>
       {/if}
-      {#if textarea}
-        <textarea
-          bind:value
-          {rows}
-          {disabled}
-          {autofocus}
-          {maxlength}
-          placeholder={hint}
-          onfocus={() => (focused = true)}
-          onblur={() => (focused = false)}
-          oninput={(e) => oninput?.((e.target as HTMLTextAreaElement).value)}
-          onchange={(e) => onchange?.((e.target as HTMLTextAreaElement).value)}
-        ></textarea>
-      {:else}
-        <input
-          bind:value
-          {type}
-          {disabled}
-          {autofocus}
-          {maxlength}
-          {inputmode}
-          placeholder={hint}
-          style="text-align:{align}"
-          onfocus={() => (focused = true)}
-          onblur={() => (focused = false)}
-          oninput={(e) => oninput?.((e.target as HTMLInputElement).value)}
-          onchange={(e) => onchange?.((e.target as HTMLInputElement).value)}
-          onkeydown={(e) => {
-            if (e.key === 'Enter') onenter?.(e)
-          }}
-        />
+      <div class="field-area">
+        {#if hasLabel && !floated}
+          <span class="ghost" class:is-error={isError}>{label}</span>
+        {/if}
+        {#if textarea}
+          <textarea
+            bind:value
+            {rows}
+            {disabled}
+            {autofocus}
+            {maxlength}
+            placeholder={showHint}
+            onfocus={() => (focused = true)}
+            onblur={() => (focused = false)}
+            oninput={(e) => oninput?.((e.target as HTMLTextAreaElement).value)}
+            onchange={(e) => onchange?.((e.target as HTMLTextAreaElement).value)}
+          ></textarea>
+        {:else}
+          <input
+            bind:value
+            {type}
+            {disabled}
+            {autofocus}
+            {maxlength}
+            {inputmode}
+            placeholder={showHint}
+            style="text-align:{align}"
+            onfocus={() => (focused = true)}
+            onblur={() => (focused = false)}
+            oninput={(e) => oninput?.((e.target as HTMLInputElement).value)}
+            onchange={(e) => onchange?.((e.target as HTMLInputElement).value)}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') onenter?.(e)
+            }}
+          />
+        {/if}
+      </div>
+      {#if suffixIcon}
+        <div class="icon-slot">
+          <Icon name={suffixIcon} size={iconSize} color="var(--md-sys-color-primary)" />
+        </div>
       {/if}
     </div>
-    {#if suffixIcon}
-      <div class="icon-slot">
-        <Icon name={suffixIcon} size={iconSize} color="var(--md-sys-color-primary)" />
-      </div>
-    {/if}
-  </div>
+  </fieldset>
   {#if errorText}
     <div class="support error">{errorText}</div>
   {:else if helperText}
@@ -114,25 +130,99 @@
   .m3-textfield {
     position: relative;
     width: 100%;
+    min-width: 0;
   }
+  /* fieldset: 原生 legend 缺口 = Flutter OutlineInputBorder 的 label 断边 */
   .container {
-    position: relative;
-    display: flex;
-    align-items: center;
-    min-height: 56px;
-    background: transparent;
+    margin: 0;
+    padding: 0;
     border: 1px solid var(--md-sys-color-outline);
-    transition: border 0.1s ease;
+    border-radius: 4px;
+    height: 56px;
+    min-width: 0;
+    width: 100%;
+    position: relative;
+    background: transparent;
+    transition: border-color 0.1s ease;
+    display: block;
+    box-sizing: border-box;
+  }
+  .container.multiline {
+    height: auto;
+    min-height: 56px;
   }
   .container.focused {
     border: 2px solid var(--md-sys-color-primary);
   }
   .m3-textfield.is-error .container {
+    border-color: var(--md-sys-color-error);
+  }
+  .m3-textfield.is-error .container.focused {
     border: 2px solid var(--md-sys-color-error);
   }
   .m3-textfield.disabled .container {
     border: 1px solid color-mix(in srgb, var(--md-sys-color-on-surface) 12%, transparent);
     background: color-mix(in srgb, var(--md-sys-color-on-surface) 4%, transparent);
+  }
+  /* 浮起标签: 落在边框线上, 原生断开描边。
+     float 使 legend 脱离流(不占内容空间) + 负 margin 上提贴线 */
+  .lbl {
+    display: block;
+    padding: 0 4px;
+    margin-left: 12px;
+    margin-top: -9px;
+    float: left;
+    font-size: 12px;
+    line-height: 16px;
+    height: 16px;
+    color: var(--md-sys-color-on-surface-variant);
+    white-space: nowrap;
+    max-width: calc(100% - 24px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .container.has-prefix .lbl {
+    margin-left: 0;
+  }
+  .container.focused .lbl {
+    color: var(--md-sys-color-primary);
+  }
+  .lbl.is-error {
+    color: var(--md-sys-color-error);
+  }
+  .m3-textfield.disabled .lbl {
+    color: color-mix(in srgb, var(--md-sys-color-on-surface) 60%, transparent);
+  }
+  /* 未浮起标签: 作为占位文字显示在框内 */
+  .ghost {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 16px;
+    line-height: 24px;
+    color: var(--md-sys-color-on-surface-variant);
+    pointer-events: none;
+    white-space: nowrap;
+    max-width: calc(100% - 8px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ghost.is-error {
+    color: var(--md-sys-color-error);
+  }
+  .m3-textfield.disabled .ghost {
+    color: color-mix(in srgb, var(--md-sys-color-on-surface) 60%, transparent);
+  }
+  /* 内容行: 流式布局。固定 54px(56-2边框) 避开 fieldset 百分比高度怪癖;
+     legend 已 float 脱离流 → 无需补偿 */
+  .inner {
+    display: flex;
+    align-items: center;
+    height: 54px;
+  }
+  .container.multiline .inner {
+    height: auto;
   }
   .icon-slot {
     width: 48px;
@@ -147,30 +237,14 @@
     flex: 1;
     position: relative;
     min-width: 0;
-    padding: 0 12px;
+    height: 100%;
     display: flex;
     flex-direction: column;
     justify-content: center;
+    padding-right: 12px;
   }
-  label {
-    position: absolute;
-    left: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 16px;
-    line-height: 24px;
-    color: var(--md-sys-color-on-surface-variant);
-    pointer-events: none;
-    transition: all 0.15s ease;
-    white-space: nowrap;
-    max-width: calc(100% - 8px);
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  label.floated {
-    top: 16px;
-    font-size: 12px;
-    line-height: 16px;
+  .container:not(.has-prefix) .field-area {
+    padding-left: 12px;
   }
   input,
   textarea {
@@ -180,27 +254,17 @@
     font-size: 16px;
     line-height: 24px;
     color: var(--md-sys-color-on-surface);
-    padding: 24px 0 4px;
+    padding: 0;
     outline: none;
     font-family: inherit;
   }
-  .no-label input,
-  .no-label textarea {
-    padding-top: 0;
-    padding-bottom: 0;
+  ::placeholder {
+    color: var(--md-sys-color-on-surface-variant);
+    opacity: 1;
   }
   textarea {
     min-height: 88px;
     resize: vertical;
-  }
-  .container.focused label {
-    color: var(--md-sys-color-primary);
-  }
-  label.is-error {
-    color: var(--md-sys-color-error);
-  }
-  .m3-textfield.disabled label {
-    color: color-mix(in srgb, var(--md-sys-color-on-surface) 60%, transparent);
   }
   .m3-textfield.disabled input,
   .m3-textfield.disabled textarea {

@@ -5,11 +5,6 @@
 //! 将各函数体替换为对 rust_lib_astral::api::* 的直接调用即可 —
 //! 前端 (src/lib/core/bridge/bridge.ts) 的调用签名与之逐一对齐。
 
-//! 命令实现（默认: mock）
-//!
-//! 两套命令是编译期互斥的: 启用 `real-backend` 时 backend.rs 提供全部命令,
-//! 本文件中的 mock 命令不参与编译 —— 否则 `#[tauri::command]` 生成的宏会在
-//! crate 根重名冲突。
 #![allow(clippy::needless_pass_by_value)]
 
 use serde::{Deserialize, Serialize};
@@ -522,15 +517,14 @@ fn parse_host_port(url: &str) -> String {
 }
 
 async fn tokio_ping(addr: &str) -> Option<i64> {
+    use std::time::Duration;
     let host_port: Vec<&str> = addr.split(':').collect();
     let host = host_port[0];
     let port: u16 = host_port.get(1).and_then(|p| p.parse().ok()).unwrap_or(80);
     let start = std::time::Instant::now();
+    let fut = std::net::TcpStream::connect((host, port));
     // 同步 connect 包一层超时 (简单实现; 真实实现可用 tokio::net)
-    match wait_with_timeout(
-        || std::net::TcpStream::connect((host, port)).map_err(|_| ()),
-        Duration::from_secs(5),
-    ) {
+    match wait_with_timeout(fut, Duration::from_secs(5)) {
         Ok(_) => Some(start.elapsed().as_millis() as i64),
         Err(_) => None,
     }
