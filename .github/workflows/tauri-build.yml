@@ -1,0 +1,134 @@
+name: 🧊 构建 Tauri 应用
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - Tauri
+
+permissions:
+  contents: write
+
+jobs:
+  # Frontend-only verification: no Rust toolchain needed, catches TS/Svelte errors fast.
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📦 安装依赖
+        working-directory: tauri-app
+        run: npm install --no-audit --no-fund
+
+      - name: 🏗️ 构建前端
+        working-directory: tauri-app
+        run: npm run build
+
+      - name: 📤 上传前端产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: astral-tauri-frontend
+          path: tauri-app/dist/
+          if-no-files-found: warn
+
+  # Windows: the EasyTier core links against the Npcap SDK and needs protoc,
+  # so both are installed before any Rust build.
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 🦀 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 🦀 Rust 缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './tauri-app/src-tauri -> target'
+
+      - name: 📦 安装 protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📦 安装 Npcap SDK（Packet.lib / wpcap.lib）
+        run: |
+          $sdkVer = "1.16"
+          $zip = Join-Path $env:RUNNER_TEMP "npcap-sdk.zip"
+          $dst = Join-Path $env:GITHUB_WORKSPACE "third_party/npcap-sdk"
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-$sdkVer.zip" -OutFile $zip
+          if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
+          New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+
+          $libDir = Join-Path $dst "Lib\x64"
+          if (!(Test-Path (Join-Path $libDir "Packet.lib"))) { throw "Packet.lib missing in $libDir" }
+          if (!(Test-Path (Join-Path $libDir "wpcap.lib"))) { throw "wpcap.lib missing in $libDir" }
+
+          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "LIB=$libDir;$env:LIB`n", $utf8NoBom)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "NPCAP_SDK_LIB=$libDir`n", $utf8NoBom)
+          Write-Host "Npcap SDK at $libDir"
+        shell: pwsh
+
+      - name: 📦 安装前端依赖
+        working-directory: tauri-app
+        run: npm install --no-audit --no-fund
+
+      # 1) GUI build (mock backend) - always produces an installer even if the
+      #    native EasyTier core fails to build.
+      - name: 🧊 构建 Tauri（GUI 版）
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ./tauri-app
+
+      - name: 📤 上传 GUI 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: astral-tauri-windows-gui
+          path: |
+            tauri-app/src-tauri/target/release/bundle/**/*.exe
+            tauri-app/src-tauri/target/release/bundle/**/*.msi
+          if-no-files-found: warn
+
+      # 2) Real backend: every command forwards to rust/src/api/** (EasyTier).
+      - name: 🧊 构建 Tauri（真实 EasyTier 后端）
+        continue-on-error: true
+        working-directory: tauri-app
+        shell: pwsh
+        env:
+          NPCAP_SDK_LIB: ${{ github.workspace }}\third_party\npcap-sdk\Lib\x64
+        run: |
+          npx tauri build --features real-backend 2>&1 |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE\real-backend-build.log"
+          exit $LASTEXITCODE
+
+      - name: 📤 上传真实后端安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: astral-tauri-windows-real-backend
+          path: |
+            tauri-app/src-tauri/target/release/bundle/**/*.exe
+            tauri-app/src-tauri/target/release/bundle/**/*.msi
+          if-no-files-found: warn
+
+      - name: 📤 上传真实后端构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-backend-build-log
+          path: real-backend-build.log
+          if-no-files-found: warn
