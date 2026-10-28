@@ -5,7 +5,10 @@ edition = "2021"
 build = "build.rs"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# `rlib` is added so the Tauri crate (tauri-app/src-tauri) can depend on this
+# crate directly; cdylib/staticlib are what flutter_rust_bridge consumes and are
+# unaffected by its addition.
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 flutter_rust_bridge = "=2.12.0"
@@ -25,7 +28,7 @@ rand = "0.8"
 surge-ping = "0.8"
 uuid = { version = "1.0", features = ["v4"] }
 
-easytier = { git = "https://github.com/Lanliy-Sama/astral.git", branch = "Easytier-Heart", features = ["wireguard", "websocket", "quic", "tun", "smoltcp", "socks5", "kcp", "faketcp", "zstd"] }
+easytier = { git = "https://github.com/Lanliy-Sama/astral.git", rev = "f28d878a229771b5b9436a200aa956ca0c124b9d" # 原 Easytier-Heart 分支已删除, 固定到同一 commit, features = ["wireguard", "websocket", "quic", "tun", "smoltcp", "socks5", "kcp", "faketcp", "zstd"] }
 elevated-command = "1.1.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
