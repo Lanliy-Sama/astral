@@ -13,8 +13,13 @@
   const s = services()
 
   let columnCount = $state(getColumns())
+  // 原版基于 LayoutBuilder constraints.maxWidth (内容区宽度 = 窗口 - 左侧导航 80)
+  function contentWidth(): number {
+    const desktopLayout = window.innerWidth > 480
+    return window.innerWidth - (desktopLayout ? 80 : 0)
+  }
   function getColumns(): number {
-    const w = window.innerWidth
+    const w = contentWidth()
     if (w >= 1200) return 4
     if (w >= 900) return 3
     if (w >= 600) return 2

@@ -217,6 +217,8 @@
     display: flex;
     align-items: center;
     cursor: grab;
+    /* 原版 ListTile 双行高度 72 */
+    min-height: 72px;
   }
   .status-bar {
     width: 4px;
@@ -243,7 +245,8 @@
   .trailing {
     display: flex;
     align-items: center;
-    padding-right: 8px;
+    /* 原版 ListTile 右侧 contentPadding 16 */
+    padding-right: 16px;
   }
   .switch-scale {
     transform: scale(0.8);

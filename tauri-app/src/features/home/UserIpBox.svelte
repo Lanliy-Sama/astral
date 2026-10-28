@@ -70,8 +70,8 @@
   </div>
 
   <div class="gap9"></div>
-  <div class="gap60"></div>
 
+  <!-- 原版: SizedBox(height: 60, child: Row[TextField + 8 + Switch列]) -->
   <div class="row ip-row">
     <div class="flex">
       <TextField
@@ -137,8 +137,9 @@
   .gap12 {
     height: 12px;
   }
-  .gap60 {
-    height: 60px;
+  .ip-row {
+    align-items: center;
+    min-height: 60px;
   }
   .room-select {
     width: 100%;
@@ -168,6 +169,8 @@
     flex: 1;
     min-width: 0;
     position: relative;
+    /* 拉伸至整行高, 使绝对定位的标签贴住上边框 */
+    align-self: stretch;
     padding: 0 12px;
     display: flex;
     flex-direction: column;
@@ -177,6 +180,11 @@
     font-size: 12px;
     line-height: 16px;
     color: var(--md-sys-color-on-surface-variant);
+    padding: 0 4px;
+    position: absolute;
+    top: -9px;
+    left: 12px;
+    background: var(--md-sys-color-surface-container-low);
   }
   .rs-text label.disabled {
     color: color-mix(in srgb, var(--md-sys-color-on-surface) 60%, transparent);

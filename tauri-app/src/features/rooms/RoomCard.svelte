@@ -29,9 +29,9 @@
       .getPropertyValue('--md-sys-color-primary')
       .trim()
     const [h, sat, l] = hexToHsl(rgb)
+    // 原版: HSLColor.fromColor(primary).withLightness(0.95/0.10) — 仅改亮度, 保留色相饱和度
     const targetL = dark ? 0.1 : 0.95
-    const targetS = dark ? sat : Math.min(1, sat * 0.6)
-    return hslToCss(h, targetS, targetL)
+    return hslToCss(h, sat, targetL)
   }
 
   function hexToHsl(hex: string): [number, number, number] {
@@ -83,7 +83,7 @@
 
 <Card
   radius={12}
-  margin="none"
+  margin="4px"
   color={isSelected ? selectedBg : 'var(--md-sys-color-surface-container-low)'}
 >
   <div
@@ -96,7 +96,7 @@
     onclick={() => s.room.setRoom(room)}
   >
     <div class="content">
-      <!-- 第一行: 名称 + 操作 -->
+      <!-- 第一行: 名称 + 操作 (原版 IconButton padding:0 + constraints:{} → 紧凑 20px) -->
       <div class="row1">
         <div class="name-area">
           {#if isSelected}
@@ -106,34 +106,35 @@
           <span class="name ellipsis">{room.name}</span>
         </div>
         <div class="actions">
-          <IconButton
-            icon="share"
-            iconSize={20}
-            size={40}
-            padding={10}
-            tip="分享房间"
+          <button
+            class="mini-btn"
+            use:tooltip={'分享房间'}
             onclick={() => roomDialogs.openShare(room)}
-          />
+          >
+            <Icon name="share" size={20} />
+          </button>
+          <span class="gap8"></span>
           {#if isSelected}
-            <IconButton icon="delete" iconSize={20} size={40} padding={10} disabled color="var(--md-sys-color-outline)" tip="不能删除正在连接的房间" />
+            <button class="mini-btn disabled" title="不能删除正在连接的房间">
+              <Icon name="delete" size={20} color="var(--md-sys-color-outline)" />
+            </button>
           {:else}
-            <IconButton
-              icon="delete"
-              iconSize={20}
-              size={40}
-              padding={10}
-              tip="删除房间"
+            <button
+              class="mini-btn"
+              use:tooltip={'删除房间'}
               onclick={() => (confirmDelete = true)}
-            />
+            >
+              <Icon name="delete" size={20} />
+            </button>
           {/if}
-          <IconButton
-            icon="edit"
-            iconSize={20}
-            size={40}
-            padding={10}
-            tip="编辑房间"
+          <span class="gap8"></span>
+          <button
+            class="mini-btn"
+            use:tooltip={'编辑房间'}
             onclick={() => roomDialogs.openEdit(room)}
-          />
+          >
+            <Icon name="edit" size={20} />
+          </button>
           <span class="gap8"></span>
           <Icon
             name={room.encrypted ? 'lock' : 'lock_open'}
@@ -176,6 +177,7 @@
   }
   .room-card.hover:not(.selected) {
     border-color: var(--md-sys-color-primary);
+    border-width: 1px;
   }
   .room-card.selected {
     border-color: var(--md-sys-color-primary);
@@ -206,6 +208,17 @@
     display: flex;
     align-items: center;
     flex-shrink: 0;
+  }
+  .mini-btn {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--md-sys-color-on-surface-variant);
+  }
+  .mini-btn.disabled {
+    pointer-events: none;
   }
   .gap8 {
     width: 8px;

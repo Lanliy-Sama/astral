@@ -21,7 +21,7 @@
 
 <div class="settings-page">
   {#if showAppBar}
-    <div class="app-bar elevation-1">
+    <div class="app-bar">
       {#if showBackButton}
         <button class="back-btn" use:ripple onclick={() => router.pop()}>
           <Icon name="arrow_back" size={24} />

@@ -12,7 +12,8 @@
 </script>
 
 <div class="home-box" style="grid-column: span {Math.min(widthSpan, 2)}">
-  <Card radius={8} margin="none" elevation={1} class="hb-card">
+  <!-- Flutter Card 默认 margin: EdgeInsets.all(4) -->
+  <Card radius={8} margin="4px" elevation={1} class="hb-card">
     <div class="hb-hover-border"></div>
     <div class="hb-content">
       {@render children?.()}

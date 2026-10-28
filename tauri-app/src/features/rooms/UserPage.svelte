@@ -46,30 +46,30 @@
 
 <svelte:window onresize={() => (columnCount = getColumns())} />
 
-{#if state !== 'connected'}
-  <!-- 未连接空态 -->
-  <div class="empty">
-    <Icon name="cloud_off_rounded" size={48} color="var(--md-sys-color-primary)" />
-    <div class="gap16"></div>
-    <div class="empty-title">无数据</div>
-  </div>
-{:else if showTopology && nodes.length > 0}
-  <TopologyView {nodes} />
-{:else if nodes.length === 0}
-  <!-- 无成员空态 -->
-  <div class="empty">
-    <Icon
-      name="people_outline"
-      size={64}
-      color="color-mix(in srgb, var(--md-sys-color-primary) 60%, transparent)"
-    />
-    <div class="gap16"></div>
-    <div class="empty-title">房间内暂无成员</div>
-    <div class="gap8"></div>
-    <div class="empty-sub">当前没有其他玩家连接到房间</div>
-  </div>
-{:else}
-  <div class="user-page">
+<div class="user-page">
+  {#if state !== 'connected'}
+    <!-- 未连接空态 -->
+    <div class="empty">
+      <Icon name="cloud_off_rounded" size={48} color="var(--md-sys-color-primary)" />
+      <div class="gap16"></div>
+      <div class="empty-title">无数据</div>
+    </div>
+  {:else if showTopology && nodes.length > 0}
+    <TopologyView {nodes} />
+  {:else if nodes.length === 0}
+    <!-- 无成员空态 -->
+    <div class="empty">
+      <Icon
+        name="people_outline"
+        size={64}
+        color="color-mix(in srgb, var(--md-sys-color-primary) 60%, transparent)"
+      />
+      <div class="gap16"></div>
+      <div class="empty-title">房间内暂无成员</div>
+      <div class="gap8"></div>
+      <div class="empty-sub">当前没有其他玩家连接到房间</div>
+    </div>
+  {:else}
     <div class="scroll" class:list-mode={s.displayState.userListStyle === 'list'}>
       {#if s.displayState.userListStyle === 'list'}
         <div class="list-container">
@@ -89,21 +89,25 @@
         </div>
       {/if}
     </div>
+  {/if}
 
-    <!-- FAB 列: 拓扑切换 / 房间设置 -->
-    <div class="fabs">
-      <Fab
-        icon={showTopology ? 'list' : 'hub'}
-        tip={showTopology ? '列表视图' : '拓扑图'}
-        onclick={() => (showTopology = !showTopology)}
-      />
-      <div class="fab-gap"></div>
-      <Fab icon="bar_chart" tip="房间设置" onclick={() => userPageSheets.openSettings()} />
-    </div>
+  <!-- FAB 列: 拓扑切换 / 房间设置 (对应 Flutter Scaffold.floatingActionButton, 始终显示) -->
+  <div class="fabs">
+    <Fab
+      icon={showTopology ? 'list' : 'hub'}
+      tip={showTopology ? '列表视图' : '拓扑图'}
+      onclick={() => (showTopology = !showTopology)}
+    />
+    <div class="fab-gap"></div>
+    <Fab icon="bar_chart" tip="房间设置" onclick={() => userPageSheets.openSettings()} />
   </div>
-{/if}
+</div>
 
 <style>
+  .user-page {
+    height: 100%;
+    position: relative;
+  }
   .empty {
     height: 100%;
     display: flex;
@@ -124,10 +128,6 @@
   }
   .gap8 {
     height: 8px;
-  }
-  .user-page {
-    height: 100%;
-    position: relative;
   }
   .scroll {
     height: 100%;
