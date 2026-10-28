@@ -162,11 +162,12 @@
     align-items: center;
     gap: 4px;
     color: var(--md-sys-color-on-surface-variant);
+    /* 原版 AnimatedDefaultTextStyle 对所有项恒为 bold */
+    font-weight: 700;
     transition: color 0.1s ease;
   }
   .nav-item.selected .nav-content {
     color: var(--md-sys-color-primary);
-    font-weight: 700;
   }
   .nav-label {
     font-size: 14px;

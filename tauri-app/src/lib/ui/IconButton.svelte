@@ -35,7 +35,7 @@
   use:tooltip={tip}
   onclick={onclick}
 >
-  <Icon {icon} size={iconSize} {outlined} />
+  <Icon name={icon} size={iconSize} {outlined} />
 </button>
 
 <style>

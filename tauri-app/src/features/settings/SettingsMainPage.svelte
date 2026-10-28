@@ -113,6 +113,8 @@
   }
   .section-header {
     padding: 0 16px 8px;
+    /* 原版: header Padding(bottom:8) + SizedBox(8) → 距卡片 16px */
+    margin-bottom: 8px;
     font-size: 16px;
     font-weight: 600;
     color: var(--md-sys-color-primary);
