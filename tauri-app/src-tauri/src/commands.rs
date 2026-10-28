@@ -5,6 +5,11 @@
 //! 将各函数体替换为对 rust_lib_astral::api::* 的直接调用即可 —
 //! 前端 (src/lib/core/bridge/bridge.ts) 的调用签名与之逐一对齐。
 
+//! 命令实现（默认: mock）
+//!
+//! 两套命令是编译期互斥的: 启用 `real-backend` 时 backend.rs 提供全部命令,
+//! 本文件中的 mock 命令不参与编译 —— 否则 `#[tauri::command]` 生成的宏会在
+//! crate 根重名冲突。
 #![allow(clippy::needless_pass_by_value)]
 
 use serde::{Deserialize, Serialize};
@@ -150,23 +155,27 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn easytier_version() -> String {
     // 真实实现: rust_lib_astral::api::simple::easytier_version().await
     format!("2.4.0|{}", std::env::consts::OS)
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn is_easytier_running(state: State<AppState>) -> bool {
     state.running.load(Ordering::SeqCst)
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn get_ips() -> Vec<String> {
     // 真实实现: rust_lib_astral::api::simple::get_ips().await
     local_ip_addresses()
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn get_running_info(state: State<AppState>) -> String {
     // 真实实现: rust_lib_astral::api::simple::get_running_info().await (JSON)
@@ -181,6 +190,7 @@ pub fn get_running_info(state: State<AppState>) -> String {
     .to_string()
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn create_server(state: State<AppState>, opts: CreateServerOptions) -> Result<String, String> {
     // 真实实现: rust_lib_astral::api::simple::create_server(...).await
@@ -198,6 +208,7 @@ pub fn create_server(state: State<AppState>, opts: CreateServerOptions) -> Resul
     Ok("ok".into())
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn close_server(state: State<AppState>) {
     // 真实实现: rust_lib_astral::api::simple::close_server().await
@@ -205,6 +216,7 @@ pub fn close_server(state: State<AppState>) {
     *state.local_ip.lock().unwrap() = String::new();
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn get_network_status(state: State<AppState>) -> KVNetworkStatus {
     // 真实实现: rust_lib_astral::api::simple::get_network_status().await
@@ -218,6 +230,7 @@ pub fn get_network_status(state: State<AppState>) -> KVNetworkStatus {
     }
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn init_app() {}
 
@@ -323,6 +336,7 @@ fn mock_nodes(state: &State<AppState>) -> Vec<KVNodeInfo> {
 // nat_test — rust/src/api/nat_test.rs
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn test_network_connectivity(_stun_server: String) -> NetworkTestResult {
     // 真实实现: rust_lib_astral::api::nat_test::test_network_connectivity(...)
@@ -334,6 +348,7 @@ pub fn test_network_connectivity(_stun_server: String) -> NetworkTestResult {
     }
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn detect_nat_type(stun_server: String) -> String {
     test_network_connectivity(stun_server).nat_type_v4
@@ -343,6 +358,7 @@ pub fn detect_nat_type(stun_server: String) -> String {
 // firewall — rust/src/api/firewall.rs (仅 Windows)
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn get_firewall_status(state: State<AppState>, profile_index: i64) -> Result<bool, String> {
     if !cfg!(windows) {
@@ -351,6 +367,7 @@ pub fn get_firewall_status(state: State<AppState>, profile_index: i64) -> Result
     Ok(state.firewall.lock().unwrap()[(profile_index - 1).clamp(0, 2) as usize])
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn set_firewall_status(
     state: State<AppState>,
@@ -368,6 +385,7 @@ pub fn set_firewall_status(
 // hops — rust/src/api/hops.rs
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn get_all_interfaces_metrics() -> Result<Vec<(String, i64)>, String> {
     // 真实实现: rust_lib_astral::api::hops::get_all_interfaces_metrics().await
@@ -379,11 +397,13 @@ pub fn get_all_interfaces_metrics() -> Result<Vec<(String, i64)>, String> {
     ])
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn set_interface_metric(_interface_name: String, _metric: i64) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn check_sudo() -> bool {
     true
@@ -393,6 +413,7 @@ pub fn check_sudo() -> bool {
 // magic_wall — rust/src/api/magic_wall.rs (WFP, 仅 Windows)
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn start_magic_wall(state: State<AppState>) -> Result<(), String> {
     if !cfg!(windows) {
@@ -405,6 +426,7 @@ pub fn start_magic_wall(state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn stop_magic_wall(state: State<AppState>) -> Result<(), String> {
     if !cfg!(windows) {
@@ -417,6 +439,7 @@ pub fn stop_magic_wall(state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn add_magic_wall_rule(state: State<AppState>, rule: MagicWallRule) -> Result<(), String> {
     if !cfg!(windows) {
@@ -430,6 +453,7 @@ pub fn add_magic_wall_rule(state: State<AppState>, rule: MagicWallRule) -> Resul
     Ok(())
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn remove_magic_wall_rule(state: State<AppState>, rule_id: String) -> Result<(), String> {
     if !cfg!(windows) {
@@ -445,12 +469,14 @@ pub fn remove_magic_wall_rule(state: State<AppState>, rule_id: String) -> Result
     }
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn update_magic_wall_rule(state: State<AppState>, rule: MagicWallRule) -> Result<(), String> {
     remove_magic_wall_rule(state.clone(), rule.rule_id.clone())?;
     add_magic_wall_rule(state, rule)
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn get_magic_wall_status(state: State<AppState>) -> MagicWallStatus {
     let rules = state.magic_wall_rules.lock().unwrap();
@@ -461,6 +487,7 @@ pub fn get_magic_wall_status(state: State<AppState>) -> MagicWallStatus {
     }
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn get_nt_path(dos_path: String) -> Option<String> {
     if dos_path.contains('\\') || dos_path.contains('/') {
@@ -474,6 +501,7 @@ pub fn get_nt_path(dos_path: String) -> Option<String> {
 // misc — ping / npcap
 // ---------------------------------------------------------------------------
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub async fn ping_server(url: String) -> Result<Option<i64>, String> {
     // TCP ping: 解析 host:port (无端口默认 80), 5s 超时, >800ms 视为离线
@@ -516,6 +544,7 @@ where
     fut()
 }
 
+#[cfg(not(feature = "real-backend"))]
 #[tauri::command]
 pub fn has_npcap_driver() -> bool {
     // 对应 connect_npcap_guard.dart 的三重探测 (文件/注册表/服务)
