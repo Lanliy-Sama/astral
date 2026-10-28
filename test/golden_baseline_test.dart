@@ -10,7 +10,10 @@
 // Each tab is rendered in isolation to keep the goldens stable: the real app
 // needs Isar + the EasyTier runtime, none of which affect the static layout.
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:astral/features/home/pages/home_page.dart';
@@ -19,10 +22,31 @@ import 'package:astral/features/tools/pages/tools_page.dart';
 import 'package:astral/features/servers/pages/server_page.dart';
 import 'package:astral/features/settings/pages/settings_main_page.dart';
 
+Future<void> loadAppFonts() async {
+  // The test binding ships only a fallback font, which renders CJK as tofu
+  // boxes. Register the app's real fonts so the goldens are readable.
+  for (final entry in {
+    'MiSans': ['fonts/MiSans-Regular.ttf', 'fonts/MiSans-Demibold.ttf'],
+  }.entries) {
+    final loader = FontLoader(entry.key);
+    for (final path in entry.value) {
+      final file = File(path);
+      if (file.existsSync()) {
+        loader.addFont(Future.value(ByteData.sublistView(file.readAsBytesSync())));
+      }
+    }
+    await loader.load();
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const surfaceSize = Size(1280, 800);
+
+  setUpAll(() async {
+    await loadAppFonts();
+  });
 
   Future<void> pumpPage(
     WidgetTester tester,
