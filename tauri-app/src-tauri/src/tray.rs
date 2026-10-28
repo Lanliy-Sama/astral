@@ -53,13 +53,16 @@ pub fn setup_close_behavior(app: &App) -> Result<(), Box<dyn std::error::Error>>
         .get_webview_window("main")
         .ok_or("main window not found")?;
 
+    // The handler is registered on `window`, so the closure must own a clone
+    // rather than the same value it borrows.
+    let handle = window.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             // 通知前端 (前端根据 closeMinimize 设置决定),
             // 前端调用 destroy 或什么都不做; 默认行为: 隐藏窗口。
-            let _ = window.emit("astral://close-requested", ());
+            let _ = handle.emit("astral://close-requested", ());
             api.prevent_close();
-            let _ = window.hide();
+            let _ = handle.hide();
         }
     });
 
