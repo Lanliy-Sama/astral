@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::State;
 
 pub struct AppState {
@@ -229,7 +230,7 @@ fn mock_nodes(state: &State<AppState>) -> Vec<KVNodeInfo> {
     let mut nodes = vec![KVNodeInfo {
         peer_id: 1,
         hostname: "本地玩家".into(),
-        ipv4: ip,
+        ipv4: ip.clone(),
         latency_ms: 0.0,
         nat: "FullCone".into(),
         hops: vec![],
@@ -446,7 +447,7 @@ pub fn remove_magic_wall_rule(state: State<AppState>, rule_id: String) -> Result
 
 #[tauri::command]
 pub fn update_magic_wall_rule(state: State<AppState>, rule: MagicWallRule) -> Result<(), String> {
-    remove_magic_wall_rule(state, rule.rule_id.clone())?;
+    remove_magic_wall_rule(state.clone(), rule.rule_id.clone())?;
     add_magic_wall_rule(state, rule)
 }
 
@@ -493,25 +494,25 @@ fn parse_host_port(url: &str) -> String {
 }
 
 async fn tokio_ping(addr: &str) -> Option<i64> {
-    use std::time::Duration;
     let host_port: Vec<&str> = addr.split(':').collect();
     let host = host_port[0];
     let port: u16 = host_port.get(1).and_then(|p| p.parse().ok()).unwrap_or(80);
     let start = std::time::Instant::now();
-    let fut = std::net::TcpStream::connect((host, port));
     // 同步 connect 包一层超时 (简单实现; 真实实现可用 tokio::net)
-    match wait_with_timeout(fut, Duration::from_secs(5)) {
+    match wait_with_timeout(
+        || std::net::TcpStream::connect((host, port)).map_err(|_| ()),
+        Duration::from_secs(5),
+    ) {
         Ok(_) => Some(start.elapsed().as_millis() as i64),
         Err(_) => None,
     }
 }
 
-fn wait_with_timeout<F, T>(fut: F, timeout: Duration) -> Result<T, ()>
+fn wait_with_timeout<F, T>(fut: F, _timeout: Duration) -> Result<T, ()>
 where
     F: FnOnce() -> Result<T, ()>,
 {
     // 在当前线程直接执行 (阻塞不超过 connect 自身超时)
-    let _ = timeout;
     fut()
 }
 
