@@ -1,0 +1,44 @@
+[package]
+name = "astral-tauri"
+version = "2.9.70"
+description = "Astral - 基于 EasyTier 的跨平台 P2P 网络应用 (Tauri + Svelte 5 前端)"
+authors = ["Astral"]
+license = "PolyForm-Noncommercial-1.0.0"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "astral_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "net", "rt"] }
+
+# The EasyTier core: the repo's existing rust/ crate (rust_lib_astral), i.e. the
+# same code the Flutter build drives through flutter_rust_bridge.
+#
+# It needs native tooling:
+#   * Npcap SDK (Packet.lib / wpcap.lib) on Windows  - see rust/build.rs
+#   * protoc, for the easytier-proto build script
+# .github/workflows/tauri-build.yml installs both before building.
+rust_lib_astral = { path = "../../rust", optional = true }
+
+[features]
+# Without this feature the commands serve deterministic mock data so the UI is
+# fully browsable; with it, backend.rs forwards every command to the real core.
+default = []
+real-backend = ["dep:rust_lib_astral"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
