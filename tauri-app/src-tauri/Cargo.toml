@@ -28,7 +28,9 @@ tokio = { version = "1", features = ["time", "net", "rt"] }
 #   * Npcap SDK (Packet.lib / wpcap.lib) on Windows  - see rust/build.rs
 #   * protoc, for the easytier-proto build script
 # .github/workflows/tauri-build.yml installs both before building.
-rust_lib_astral = { path = "../../rust", optional = true }
+# default-features = false skips flutter_rust_bridge + frb_generated.rs:
+# that layer only exists to serve the Dart/Flutter side.
+rust_lib_astral = { path = "../../rust", optional = true, default-features = false }
 
 [features]
 # Without this feature the commands serve deterministic mock data so the UI is

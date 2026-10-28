@@ -10,8 +10,14 @@ build = "build.rs"
 # unaffected by its addition.
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+# flutter_rust_bridge is only the *Dart* binding layer. Consumers that are not
+# Flutter (tauri-app) disable it and skip compiling frb_generated.rs entirely.
+default = ["frb"]
+frb = ["dep:flutter_rust_bridge"]
+
 [dependencies]
-flutter_rust_bridge = "=2.12.0"
+flutter_rust_bridge = { version = "=2.12.0", optional = true }
 lazy_static =  "1.4"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -28,8 +34,7 @@ rand = "0.8"
 surge-ping = "0.8"
 uuid = { version = "1.0", features = ["v4"] }
 
-# 原 Easytier-Heart 分支已删除, 固定到同一 commit 以便构建。
-easytier = { git = "https://github.com/Lanliy-Sama/astral.git", rev = "f28d878a229771b5b9436a200aa956ca0c124b9d", features = ["wireguard", "websocket", "quic", "tun", "smoltcp", "socks5", "kcp", "faketcp", "zstd"] }
+easytier = { git = "https://github.com/Lanliy-Sama/astral.git", branch = "Easytier-Heart", features = ["wireguard", "websocket", "quic", "tun", "smoltcp", "socks5", "kcp", "faketcp", "zstd"] }
 elevated-command = "1.1.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]

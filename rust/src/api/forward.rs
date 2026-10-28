@@ -1,3 +1,4 @@
+#[cfg(feature = "frb")]
 use flutter_rust_bridge::frb;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -14,7 +15,7 @@ lazy_static! {
     static ref FORWARD_SERVERS: Mutex<Vec<ForwardServer>> = Mutex::new(Vec::new());
 }
 
-#[frb(opaque)]
+#[cfg_attr(feature = "frb", frb(opaque))]
 #[derive(Clone)]
 pub struct ServerStats {
     connections: Arc<AtomicUsize>,
@@ -43,7 +44,8 @@ impl ServerStats {
         self.bytes_received.load(Ordering::Relaxed)
     }
 }
-#[frb(opaque)]pub struct ForwardServer {
+#[cfg_attr(feature = "frb", frb(opaque))]
+pub struct ForwardServer {
     listen_addr: String,
     forward_addr: String,
     handle: Option<JoinHandle<()>>,
@@ -52,7 +54,7 @@ impl ServerStats {
 }
 
 impl ForwardServer {
-    #[frb(ignore)]
+    #[cfg_attr(feature = "frb", frb(ignore))]
     pub fn new(listen_addr: impl Into<String>, forward_addr: impl Into<String>) -> Self {
         Self {
             listen_addr: listen_addr.into(),

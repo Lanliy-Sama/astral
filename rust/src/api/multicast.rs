@@ -1,3 +1,4 @@
+#[cfg(feature = "frb")]
 use flutter_rust_bridge::frb;
 use tokio::io;
 use tokio::net::UdpSocket;
@@ -14,7 +15,7 @@ lazy_static! {
     static ref MULTICAST_SENDERS: Mutex<Vec<MulticastSender>> = Mutex::new(Vec::new());
 }
 
-#[frb(opaque)]
+#[cfg_attr(feature = "frb", frb(opaque))]
 pub struct MulticastSender {
     multicast_addr: SocketAddr,
     bind_addr: String,
@@ -25,7 +26,7 @@ pub struct MulticastSender {
 }
 
 impl MulticastSender {
-    #[frb(ignore)]
+    #[cfg_attr(feature = "frb", frb(ignore))]
     pub fn new(
         multicast_addr: impl Into<String>,
         port: u16,
@@ -47,7 +48,7 @@ impl MulticastSender {
         })
     }
 
-    #[frb(ignore)]
+    #[cfg_attr(feature = "frb", frb(ignore))]
     pub fn with_bind_addr(mut self, bind_addr: impl Into<String>) -> Self {
         self.bind_addr = bind_addr.into();
         self
